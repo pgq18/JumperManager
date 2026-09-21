@@ -1,0 +1,17 @@
+# Windows CPython 3.14 build toolchain. Install in .venv-build, not globally.
+# Direct versions checked against the official PyPI registry on 2026-09-20:
+# https://pypi.org/project/pyinstaller/6.22.3/
+# https://pypi.org/project/pystray/0.19.5/
+# https://pypi.org/project/pillow/12.3.0/
+PyInstaller==6.22.3
+pystray==0.19.5
+Pillow==12.3.0
+# Transitive build/runtime dependencies resolved by official PyPI for Windows
+# CPython 3.14 on the same date; pin hooks as well as the top-level packager.
+altgraph==0.17.5
+packaging==26.3
+pefile==2024.8.26
+pyinstaller-hooks-contrib==2026.7
+pywin32-ctypes==0.2.3
+setuptools==84.0.0
+six==1.17.0

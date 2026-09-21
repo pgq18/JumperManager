@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#0c121b">
+  <title>JumperManager · 端口映射控制台</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%232ed3b7'/%3E%3Cpath d='M8 10h9v8a5 5 0 0 1-10 0m10-8h8m-4-4 4 4-4 4' fill='none' stroke='%230c121b' stroke-width='3'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/styles.css">
+  <script defer src="/app.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">跳到主要内容</a>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="#overview" aria-label="JumperManager 首页">
+        <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 32 32"><path d="M7 10h10v8a5 5 0 0 1-10 0m10-8h8m-4-4 4 4-4 4"/></svg></span>
+        <span>Jumper<span class="brand-light">Manager</span><small>本机端口映射控制台</small></span>
+      </a>
+      <div class="nav-caption">工作空间</div>
+      <nav class="nav-list" aria-label="主导航">
+        <button class="nav-item active" data-view="overview" type="button" aria-label="映射总览" title="映射总览"><span data-icon="topology"></span><span>映射总览</span><span class="nav-count" id="navMappingCount">0</span></button>
+        <button class="nav-item" data-view="hosts" type="button" aria-label="设备与路由" title="设备与路由"><span data-icon="server"></span><span>设备与路由</span><span class="nav-count" id="navHostCount">0</span></button>
+        <button class="nav-item" data-view="activity" type="button" aria-label="运行日志" title="运行日志"><span data-icon="terminal"></span><span>运行日志</span></button>
+      </nav>
+      <div class="sidebar-note"><span class="tiny-label">HOW IT WORKS</span><div class="mini-flow"><span data-icon="server"></span><i></i><span class="mini-local" data-icon="laptop"></span><i></i><span data-icon="server"></span></div><strong>让本机成为连接的桥梁</strong><p>使用已有 SSH 配置识别跳板路径，按需启动端口映射。</p></div>
+      <div class="sidebar-bottom">
+        <div class="service-state"><span class="status-dot" id="serviceDot"></span><span id="serviceText">正在连接服务</span><span class="version">v1.1.1</span></div>
+        <div class="local-endpoint"><span id="serviceEndpoint">127.0.0.1:8765</span><span>仅本机访问</span></div>
+        <button type="button" id="shutdownButton" class="quiet-button"><span data-icon="power"></span>关闭程序</button>
+      </div>
+    </aside>
+
+    <main id="main" class="main-content">
+      <header class="topbar"><div class="breadcrumb">工作空间 <span>/</span> <strong id="pageTitle">映射总览</strong></div><div class="topbar-right"><span class="manual-badge"><span data-icon="activity"></span>本机后台服务</span><button type="button" class="icon-button" id="refreshButton" title="刷新状态" aria-label="刷新状态"><span data-icon="refresh"></span></button></div></header>
+      <div id="connectionBanner" class="connection-banner" role="status" hidden></div>
+
+      <section class="view active" id="view-overview" aria-label="映射总览">
+        <div class="page-heading"><div><div class="eyebrow"><span></span>SSH PORT FORWARDING</div><h1>连接设备，打通端口。</h1><p>一处管理 SSH 隧道，让每条连接都有迹可循。</p></div><button type="button" class="button primary" id="newMappingButton"><span data-icon="plus"></span>新建映射</button></div>
+        <div class="stats-grid">
+          <div class="stat-card"><div class="stat-label">已识别设备<span data-icon="server"></span></div><div class="stat-value" id="statHosts">—</div><div class="stat-foot">SSH 配置 · 自动同步</div></div>
+          <div class="stat-card"><div class="stat-label">全部映射<span data-icon="route"></span></div><div class="stat-value" id="statTotal">—</div><div class="stat-foot">独立配置 · 按需启停</div></div>
+          <div class="stat-card accent"><div class="stat-label">正在运行<span data-icon="activity"></span></div><div class="stat-value" id="statRunning">—</div><div class="stat-foot"><span class="status-dot"></span>后台 SSH 隧道</div></div>
+          <div class="stat-card"><div class="stat-label">需要关注<span data-icon="alert"></span></div><div class="stat-value" id="statAttention">—</div><div class="stat-foot" id="attentionHint">暂无异常映射</div></div>
+        </div>
+
+        <section class="panel topology-panel" aria-labelledby="topologyTitle">
+          <div class="panel-heading"><div class="section-title"><span class="section-icon" data-icon="topology"></span><h2 id="topologyTitle">连接拓扑</h2><span class="subtle-tag" id="graphTag">SSH 路由</span></div><div class="segmented-control" aria-label="拓扑视图"><button type="button" data-graph="mapping" aria-pressed="false">映射链路</button><button type="button" class="active" data-graph="ssh" aria-pressed="true">SSH 路由</button></div></div>
+          <div class="graph-toolbar"><div class="graph-legend"><span><i class="legend-line ssh-line"></i>SSH 连接</span><span><i class="legend-line flow-line"></i>端口数据流</span><span><i class="legend-node"></i>本机中转</span></div><button type="button" id="fitGraphButton" class="text-button"><span data-icon="maximize"></span>适应视图</button></div>
+          <div class="graph-viewport" id="graphViewport"><svg id="topologySvg" role="img" aria-label="设备之间的 SSH 连接和端口映射关系" xmlns="http://www.w3.org/2000/svg"></svg><div class="graph-empty" id="graphEmpty" hidden><span data-icon="route"></span><strong>从第一条映射开始</strong><p>选择两个设备与端口，程序会规划经本机中转的路径。</p><button type="button" class="button secondary" id="graphNewButton">新建映射<span data-icon="arrowRight"></span></button></div></div>
+          <div class="graph-caption"><span data-icon="info"></span><span id="graphCaption">正在读取 SSH 路由…</span><span class="graph-caption-end">LOCAL RELAY</span></div>
+        </section>
+
+        <div class="workspace-grid">
+          <section class="panel mapping-panel" aria-labelledby="mappingTitle"><div class="panel-heading"><div class="section-title"><h2 id="mappingTitle">端口映射</h2><span class="count-badge" id="mappingCount">0</span></div><div class="mapping-filter"><label class="search-field"><span data-icon="search"></span><input id="mappingSearch" type="search" placeholder="搜索映射或设备" aria-label="搜索映射或设备"></label><select id="statusFilter" aria-label="筛选映射状态"><option value="all">全部状态</option><option value="running">运行中</option><option value="stopped">已停止</option><option value="attention">需关注</option></select></div></div><div id="mappingList" class="mapping-list"></div></section>
+          <aside class="panel details-panel" aria-labelledby="detailTitle"><div class="panel-heading"><div class="section-title"><h2 id="detailTitle">映射详情</h2></div><span class="subtle-tag">INSPECT</span></div><div id="mappingDetails" class="mapping-details"></div></aside>
+        </div>
+        <div class="page-footer"><span><span data-icon="lock"></span>复用 SSH 密钥和 ssh-agent，不保存登录密码</span><span id="lastRefresh">等待首次更新</span></div>
+      </section>
+
+      <section class="view" id="view-hosts" aria-label="设备与路由" hidden>
+        <div class="page-heading"><div><div class="eyebrow"><span></span>DEVICE INVENTORY</div><h1>设备与路由</h1><p>自动同步 SSH Host 配置，解析每一步跳板连接。</p></div><button type="button" class="button secondary" id="refreshHostsButton"><span data-icon="refresh"></span>立即同步 SSH 配置</button></div>
+        <div class="info-strip"><span data-icon="file"></span><div><span>SSH 配置文件</span><code id="sshConfigPath">读取中…</code></div><span class="subtle-tag">READ ONLY</span></div>
+        <div class="discovery-status" id="discoveryStatus" role="status"><div class="discovery-heading"><span class="status-dot pending" id="discoveryDot"></span><strong id="discoveryTitle">自动监测 SSH 配置变化</strong><span id="discoveryState" class="subtle-tag">正在读取状态</span></div><p id="discoveryMeta">SSH 配置及 Include 文件的变化会自动同步到设备列表。</p><p id="discoveryError" class="discovery-error" hidden></p></div>
+        <div id="hostList" class="host-grid"></div>
+        <div class="help-note"><span data-icon="info"></span><p>设备来自本机 SSH 配置的具体 Host 别名。新增、删除或修改设备后，列表和路由会自动更新，也可点击“立即同步 SSH 配置”。连接测试使用已有密钥或 ssh-agent，未知主机需先在终端完成首次连接。</p></div>
+      </section>
+
+      <section class="view" id="view-activity" aria-label="运行日志" hidden>
+        <div class="page-heading"><div><div class="eyebrow"><span></span>ACTIVITY LOG</div><h1>每次连接，都有记录。</h1><p>查看启动、停止和连接检查的过程与诊断信息。</p></div><span class="live-label"><span class="status-dot"></span>自动更新</span></div>
+        <section class="panel"><div class="panel-heading"><div class="section-title"><span class="section-icon" data-icon="terminal"></span><h2>事件记录</h2><span class="count-badge" id="activityCount">0</span></div><select id="logFilter" aria-label="筛选日志映射"><option value="all">全部映射</option></select></div><div id="activityList" class="activity-list"></div></section>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="mappingDialog" class="dialog mapping-dialog" aria-labelledby="dialogTitle"><form id="mappingForm" novalidate>
+    <div class="dialog-heading"><div><div class="eyebrow">MAPPING CONFIGURATION</div><h2 id="dialogTitle">新建端口映射</h2></div><button type="button" class="icon-button" id="closeDialogButton" aria-label="关闭配置窗口"><span data-icon="close"></span></button></div>
+    <div class="dialog-content">
+      <label class="field"><span>映射名称 <em>便于识别</em></span><input id="formName" name="name" maxlength="120" placeholder="例如：访问远端推理服务" autocomplete="off"></label>
+      <div class="endpoint-form-grid"><fieldset class="endpoint-fieldset"><legend><span class="step-number">01</span>访问入口</legend><p>在哪台设备上，通过哪个端口访问？</p><label class="field"><span>来源设备</span><select id="formSourceHost" name="source_host" required></select></label><label class="field"><span>监听端口</span><input id="formSourcePort" name="source_port" type="number" min="1" max="65535" required placeholder="50051" inputmode="numeric"></label></fieldset><div class="endpoint-arrow" data-icon="arrowRight"></div><fieldset class="endpoint-fieldset"><legend><span class="step-number">02</span>目标服务</legend><p>实际连接到哪台设备上的服务？</p><label class="field"><span>目标设备</span><select id="formTargetHost" name="target_host" required></select></label><label class="field"><span>服务端口</span><input id="formTargetPort" name="target_port" type="number" min="1" max="65535" required placeholder="50051" inputmode="numeric"></label></fieldset></div>
+      <details class="advanced-options"><summary><span data-icon="settings"></span>高级设置<span>服务地址与启动偏好</span></summary><div class="advanced-grid"><label class="field"><span>来源监听地址</span><select id="formBindAddress" name="bind_address"><option value="127.0.0.1">127.0.0.1 · IPv4 回环</option><option value="::1">::1 · IPv6 回环</option></select><small>仅供来源设备自身访问</small></label><label class="field"><span>目标服务地址</span><input id="formTargetAddress" name="target_address" value="127.0.0.1" required placeholder="127.0.0.1" autocomplete="off"><small>此地址相对于目标设备解析</small></label></div><label class="checkbox-field"><input id="formAutoStart" name="auto_start" type="checkbox"><span>打开管理器时自动启动此映射<small>在启动 JumperManager 时生效，不设置 Windows 开机自启。</small></span></label></details>
+      <div id="formConfigNotice" class="form-config-notice" role="status" hidden></div><div id="formError" class="inline-error" role="alert" hidden></div><div id="previewPanel" class="preview-panel" hidden></div>
+      <div class="dialog-hint"><span data-icon="info"></span><p>先预览路径，再保存。新映射保持停止，启动时才会创建后台 SSH 隧道。</p></div>
+    </div>
+    <div class="dialog-footer"><button type="button" id="exampleButton" class="text-button">填入当前设备示例</button><div class="dialog-actions"><button type="button" class="button secondary" id="previewButton"><span data-icon="route"></span>预览路径</button><button type="submit" class="button primary" id="saveMappingButton" disabled>保存映射</button></div></div>
+  </form></dialog>
+
+  <dialog id="confirmDialog" class="dialog confirm-dialog" aria-labelledby="confirmTitle"><div class="dialog-heading"><h2 id="confirmTitle">确认操作</h2><button type="button" class="icon-button" id="confirmCloseButton" aria-label="取消操作"><span data-icon="close"></span></button></div><div class="dialog-content"><p id="confirmMessage"></p></div><div class="dialog-footer"><button type="button" class="button secondary" id="confirmCancelButton">取消</button><button type="button" class="button danger" id="confirmOkButton">确认</button></div></dialog>
+  <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="false"></div>
+</body>
+</html>
+

@@ -1,0 +1,35 @@
+# Personal device settings, generated SSH configuration and runtime logs
+/data/
+*.log
+.env
+.env.*
+!.env.example
+/.ssh/
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+
+# Python environments and caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+.venv-build/
+
+# Generated builds and release packages
+/build/
+/dist/
+/JumperManager.exe
+*.zip
+*.lnk
+
+# Local development and verification records
+/API_CONTRACT.md
+/TEST_REPORT.md
+/.codex/
+/.agents/
+/.idea/
+/.vscode/
+Thumbs.db
+.DS_Store
