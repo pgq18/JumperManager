@@ -846,7 +846,8 @@ except OSError as e:
                     entry = self._spawn(mapping_id, source, "-R", spec)
                     self._wait_ready(mapping_id, entry)
                 with self._lock:
-                    mapping["status"] = "running"
+                    # A listener alone does not yet establish availability.
+                    mapping["status"] = "degraded"
                 self._log(mapping_id, "info", "隧道监听已建立，继续分别检查隧道和目标服务状态。")
             except Exception as exc:
                 try:
@@ -863,11 +864,11 @@ except OSError as e:
                 return self.check(mapping_id)
             except Exception as exc:
                 checked_at = now()
-                message = "隧道监听已建立，但状态检查未完成；已保留隧道，可稍后再次检查。"
+                message = "无法确认是否可用：连接检查未完成。"
                 with self._lock:
-                    mapping.update(status="degraded", error=None, last_checked=checked_at,
+                    mapping.update(status="degraded", error=message, last_checked=checked_at,
                                    health={"ok": False, "tunnel_ok": None, "target_ok": None,
-                                           "summary": message, "details": [str(exc)], "checked_at": checked_at})
+                                           "summary": message, "details": ["已保留隧道，可稍后再次检查。", str(exc)], "checked_at": checked_at})
                 self._log(mapping_id, "warning", f"{message} {exc}")
                 return copy.deepcopy(mapping)
 
@@ -969,21 +970,21 @@ except OSError as e:
                 tunnel_ok = tunnel_ok and bool(relay["ok"])
             details.append("上述检查没有发送应用协议数据；TCP 接受连接不代表完整应用请求成功。")
             checked_at = now()
-            ok = bool(tunnel_ok and target_ok)
+            ok = bool(tunnel_ok and target_ok is True)
             if ok:
-                summary = "SSH/监听与目标 TCP 检查通过；应用协议未验证。"
+                summary = "可用：连接检查通过。"
             elif tunnel_ok and target_ok is False:
-                summary = "隧道运行正常；目标 TCP 当前不可达，不影响隧道保持运行。"
+                summary = f"不可用：目标设备的 {mapping['target_address']}:{mapping['target_port']} 无法连接。"
             elif tunnel_ok:
-                summary = "隧道运行正常；本次无法确认目标 TCP 状态，请查看检查详情。"
+                summary = "无法确认是否可用：目标检查未完成。"
             else:
-                summary = "隧道检查存在异常，请检查详细信息及日志。"
+                summary = "不可用：连接检查失败。"
             health = {"ok": ok, "tunnel_ok": tunnel_ok, "target_ok": target_ok,
                       "summary": summary, "details": details, "checked_at": checked_at}
             with self._lock:
-                mapping.update(health=health, last_checked=checked_at, status="running" if tunnel_ok else "degraded",
-                               error=None if tunnel_ok else "；".join(details[:-1]))
-            self._log(mapping_id, "info" if tunnel_ok else "warning", health["summary"])
+                mapping.update(health=health, last_checked=checked_at, status="running" if ok else "degraded",
+                               error=None if ok else summary)
+            self._log(mapping_id, "info" if ok else "warning", health["summary"])
             return copy.deepcopy(mapping)
 
     def _monitor(self):

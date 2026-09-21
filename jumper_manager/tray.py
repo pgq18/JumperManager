@@ -89,7 +89,7 @@ class TrayController:
         self._autostart_thread = None
         self._error: Exception | None = None
         self._status_error: str | None = None
-        self._counts = (0, 0, 0, 0)  # running tunnels, degraded, error, total
+        self._counts = (0, 0, 0)  # available, unavailable, total
         self._has_status = False
         self._last_display = None
         self._last_open = float("-inf")
@@ -196,9 +196,17 @@ class TrayController:
             if not isinstance(mappings, (list, tuple)):
                 raise ValueError("映射状态格式无效")
             valid_mappings = [mapping for mapping in mappings if isinstance(mapping, Mapping)]
-            statuses = [mapping.get("status") for mapping in valid_mappings]
-            counts = (statuses.count("running"), statuses.count("degraded"),
-                      statuses.count("error"), len(statuses))
+            available = sum(
+                mapping.get("status") == "running"
+                and not mapping.get("error")
+                and not mapping.get("config_changed")
+                and isinstance(mapping.get("health"), Mapping)
+                and all(mapping["health"].get(field) is True for field in ("ok", "tunnel_ok", "target_ok"))
+                for mapping in valid_mappings
+            )
+            unavailable = sum(mapping.get("status") in {"running", "degraded", "error"}
+                              for mapping in valid_mappings) - available
+            counts = (available, unavailable, len(valid_mappings))
             with self._lock:
                 self._counts = counts
                 self._has_status = True
@@ -320,8 +328,8 @@ class TrayController:
                 return "状态读取失败（请查看日志）"
             if not self._has_status:
                 return "正在读取映射状态…"
-            running, degraded, errors, total = self._counts
-            return f"映射：{running} 运行中 / {total} 总数 · {degraded + errors} 需关注"
+            available, unavailable, total = self._counts
+            return f"可用 {available}/总数 {total} · 不可用 {unavailable}"
 
     def _exit_text(self, _item=None):
         return "正在退出…" if self._exit_requested.is_set() else "退出 JumperManager（停止映射）"
@@ -335,8 +343,8 @@ class TrayController:
             elif self._status_error is not None:
                 title = "JumperManager · 状态读取失败，请查看日志"
             else:
-                running, degraded, errors, total = self._counts
-                title = f"JumperManager · 运行 {running}/{total} · 降级 {degraded} · 异常 {errors}"
+                available, unavailable, total = self._counts
+                title = f"JumperManager · 可用 {available}/总数 {total} · 不可用 {unavailable}"
             signature = (title, self._status_text(), self._autostart_text(),
                          self._autostart_checked(), self._autostart_available())
             if signature == self._last_display:

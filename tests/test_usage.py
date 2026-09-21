@@ -153,9 +153,9 @@ class UsageTests(unittest.TestCase):
              patch.object(self.manager, "_endpoint_check", side_effect=probe):
             result = self.manager.check(mapping["id"])
         self.assertEqual(actions, ["snapshot", "server-b", "server-a"])
-        self.assertEqual(result["status"], "running")
+        self.assertEqual(result["status"], "degraded")
         self.assertFalse(result["health"]["target_ok"])
-        self.assertIsNone(result["error"])
+        self.assertEqual(result["error"], "不可用：目标设备的 127.0.0.1:50051 无法连接。")
         self.assertEqual(result["usage"]["active_connections"], 1)
         self.assertTrue(result["usage"]["in_use"])
         self.assertIn(("127.0.0.1", 40003), self.manager._probe_peers[mapping["id"]])

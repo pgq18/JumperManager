@@ -172,12 +172,30 @@ class EngineTests(unittest.TestCase):
         self.manager._processes[mapping["id"]] = [{"process": process, "alias": "server-a", "log": self.root / "absent", "offset": 0}]
         with patch.object(self.manager, "_endpoint_check", side_effect=[{"ok": False, "message": "refused"}, {"ok": True}]):
             result = self.manager.check(mapping["id"])
-        self.assertEqual(result["status"], "running")
+        self.assertEqual(result["status"], "degraded")
         self.assertFalse(result["health"]["ok"])
         self.assertTrue(result["health"]["tunnel_ok"])
         self.assertFalse(result["health"]["target_ok"])
-        self.assertIsNone(result["error"])
+        self.assertEqual(result["error"], result["health"]["summary"])
         self.manager._processes.clear()
+
+    def test_failed_source_listener_is_unavailable_even_when_target_responds(self):
+        mapping = self.manager.create(payload())
+        self.manager._get(mapping["id"])["status"] = "running"
+        process = MagicMock()
+        process.poll.return_value = None
+        entry = {"process": process, "alias": "server-a", "log": self.root / "absent", "offset": 0}
+        self.manager._processes[mapping["id"]] = [entry]
+        try:
+            with patch.object(self.manager, "_endpoint_check", side_effect=[{"ok": True}, {"ok": False, "message": "refused"}]):
+                result = self.manager.check(mapping["id"])
+            self.assertEqual(result["status"], "degraded")
+            self.assertTrue(result["health"]["target_ok"])
+            self.assertFalse(result["health"]["tunnel_ok"])
+            self.assertEqual(result["error"], "不可用：连接检查失败。")
+            self.assertEqual(self.manager._processes[mapping["id"]], [entry])
+        finally:
+            self.manager._processes.clear()
 
     def test_target_can_start_after_local_tunnel_without_restarting_it(self):
         # Reserve the target address without listening: connect must fail until
@@ -194,12 +212,12 @@ class EngineTests(unittest.TestCase):
         thread = None
         try:
             result = self.manager.start(mapping["id"])
-            self.assertEqual(result["status"], "running")
+            self.assertEqual(result["status"], "degraded")
             self.assertTrue(result["health"]["tunnel_ok"])
             self.assertFalse(result["health"]["target_ok"])
             self.assertFalse(result["health"]["ok"])
-            self.assertIsNone(result["error"])
-            self.assertIn("运行正常", result["health"]["summary"])
+            self.assertEqual(result["error"], result["health"]["summary"])
+            self.assertEqual(result["health"]["summary"], f"不可用：目标设备的 127.0.0.1:{target_port} 无法连接。")
             self.assertNotIn("等待", result["health"]["summary"])
             relay = self.manager._relays[mapping["id"]]
             self.assertFalse(relay.closed.is_set())
@@ -237,6 +255,7 @@ class EngineTests(unittest.TestCase):
             self.assertTrue(healthy["health"]["tunnel_ok"])
             self.assertTrue(healthy["health"]["target_ok"])
             self.assertTrue(healthy["health"]["ok"])
+            self.assertEqual(healthy["health"]["summary"], "可用：连接检查通过。")
             self.assertIsNone(healthy["error"])
         finally:
             self.manager.stop(mapping["id"])
@@ -274,28 +293,28 @@ class EngineTests(unittest.TestCase):
              patch("jumper_manager.engine.terminate_owned", return_value=True) as terminate:
             try:
                 result = self.manager.start(mapping["id"])
-                self.assertEqual(result["status"], "running")
+                self.assertEqual(result["status"], "degraded")
                 self.assertTrue(result["health"]["tunnel_ok"])
                 self.assertFalse(result["health"]["target_ok"])
-                self.assertIsNone(result["error"])
+                self.assertEqual(result["error"], result["health"]["summary"])
                 self.assertEqual(ready.call_count, 2)
                 self.assertEqual([entry["kind"] for entry in entries], ["-L", "-R"])
                 for reachable in (True, False, True):
                     target_state["ready"] = reachable
                     checked = self.manager.check(mapping["id"])
-                    self.assertEqual(checked["status"], "running")
+                    self.assertEqual(checked["status"], "running" if reachable else "degraded")
                     self.assertTrue(checked["health"]["tunnel_ok"])
                     self.assertEqual(checked["health"]["target_ok"], reachable)
-                    self.assertIsNone(checked["error"])
+                    self.assertEqual(checked["error"], None if reachable else checked["health"]["summary"])
                     self.assertEqual(self.manager._processes[mapping["id"]], entries)
                 target_state["failure"] = OSError("Could not launch the diagnostic SSH process")
                 checked = self.manager.check(mapping["id"])
-                self.assertEqual(checked["status"], "running")
+                self.assertEqual(checked["status"], "degraded")
                 self.assertTrue(checked["health"]["tunnel_ok"])
                 self.assertIsNone(checked["health"]["target_ok"])
                 self.assertFalse(checked["health"]["ok"])
                 self.assertIn("无法确认", checked["health"]["summary"])
-                self.assertIsNone(checked["error"])
+                self.assertEqual(checked["error"], "无法确认是否可用：目标检查未完成。")
                 self.assertIn("diagnostic SSH", " ".join(checked["health"]["details"]))
                 self.assertEqual(spawned.call_count, 2)
                 terminate.assert_not_called()
@@ -349,9 +368,9 @@ class EngineTests(unittest.TestCase):
         with patch.object(self.manager, "check", side_effect=TypeError("invalid diagnostic response")):
             result = self.manager.start(mapping["id"])
         self.assertEqual(result["status"], "degraded")
-        self.assertIsNone(result["error"])
+        self.assertEqual(result["error"], result["health"]["summary"])
         self.assertIsNone(result["health"]["target_ok"])
-        self.assertIn("已保留隧道", result["health"]["summary"])
+        self.assertIn("已保留隧道", " ".join(result["health"]["details"]))
         relay = self.manager._relays[mapping["id"]]
         self.assertFalse(relay.closed.is_set())
         self.assertEqual(relay.listener.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN), 1)

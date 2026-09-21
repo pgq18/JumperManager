@@ -926,11 +926,11 @@ h1 {
 }
 
 .graph-node.local .node-title {
-  fill: var(--accent);
+  fill: var(--text);
 }
 
 .graph-node.local .node-kind {
-  fill: #559f93;
+  fill: #8191a7;
 }
 
 .graph-node .port-label {
@@ -951,7 +951,7 @@ h1 {
 }
 
 .graph-edge.mapping {
-  stroke: #36d4b7;
+  stroke: #6d829a;
   stroke-width: 2;
   stroke-dasharray: none;
 }
@@ -971,7 +971,7 @@ h1 {
   font: 12px var(--font);
 }
 
-.graph-edge-label.mapping {
+.graph-edge-label.available,.graph-column-label.available {
   fill: #64bbaa;
 }
 
@@ -1154,13 +1154,13 @@ h1 {
   background: currentColor;
 }
 
-.status-badge.running {
+.status-badge.available {
   color: var(--accent);
   border-color: #36d4b720;
   background: #36d4b70b;
 }
 
-.status-badge.error,.status-badge.degraded {
+.status-badge.unavailable {
   color: var(--danger);
   border-color: #f08c8d25;
   background: #f08c8d0b;
@@ -1354,12 +1354,12 @@ h1 {
 }
 
 .usage-badge.in-use,.usage-summary.in-use {
-  color: var(--accent);
+  color: #bdd0e7;
 }
 
 .usage-badge.in-use {
-  background: #36d4b70a;
-  border-color: #36d4b722;
+  background: #719efa0a;
+  border-color: #719efa28;
 }
 
 .target-status {
@@ -1446,6 +1446,69 @@ h1 {
 .health-diagnostics summary {
   cursor: pointer;
   font-size: 12px;
+}
+
+.graph-edge.mapping.available {
+  stroke: var(--accent);
+}
+
+.graph-edge.mapping.unavailable {
+  stroke: var(--danger);
+  stroke-dasharray: 5 4;
+}
+
+.graph-edge-label.unavailable,.graph-column-label.unavailable,.graph-node.unavailable .node-kind {
+  fill: var(--danger);
+}
+
+.graph-node.available .node-kind,.graph-node.available .node-title {
+  fill: #64bbaa;
+}
+
+.mapping-unavailable,.mapping-notice {
+  font-size: 13px;
+  line-height: 1.7;
+  margin: 0 0 13px;
+  overflow-wrap: anywhere;
+}
+
+.mapping-unavailable {
+  color: var(--danger);
+}
+
+.mapping-notice {
+  color: var(--muted);
+}
+
+.detail-check-time {
+  margin-top: 12px;
+  font-size: 12px;
+  color: var(--dim);
+}
+
+.mapping-diagnostics {
+  margin-top: 20px;
+  border-top: 1px solid var(--line-soft);
+  padding-top: 15px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--muted);
+}
+
+.mapping-diagnostics>summary {
+  cursor: pointer;
+  color: var(--text);
+  font-size: 14px;
+}
+
+.mapping-diagnostics>p {
+  margin-top: 12px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.mapping-diagnostics .diagnostic-error {
+  color: var(--danger);
 }
 
 .empty-state {
@@ -2428,6 +2491,16 @@ h1 {
 
 .toast.warning>.icon {
   color: var(--warning);
+}
+
+.toast.neutral {
+  background: #1b2636;
+  border-color: #3b4d65;
+  color: #c4d0e1;
+}
+
+.toast.neutral>.icon {
+  color: var(--muted);
 }
 
 .toast .icon-button {

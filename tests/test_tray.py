@@ -139,34 +139,58 @@ class TrayTests(unittest.TestCase):
 
     def test_counts_menu_and_tooltip_follow_state_changes(self):
         self.status["mappings"] = [{"status": value} for value in ("running", "running", "degraded", "error", "stopped")]
+        for mapping in self.status["mappings"][:2]:
+            mapping["health"] = {"ok": True, "tunnel_ok": True, "target_ok": True}
         self.controller.start()
         icon = self.controller._icon
-        wait_for(lambda: "运行 2/5" in icon.title)
-        self.assertIn("降级 1", icon.title)
-        self.assertIn("异常 1", icon.title)
+        wait_for(lambda: "可用 2/总数 5" in icon.title)
+        self.assertIn("不可用 2", icon.title)
         status_item = icon.menu.items[1]
         self.assertFalse(status_item.enabled)
-        self.assertIn("2 运行中 / 5 总数", status_item.text)
-        self.assertIn("2 需关注", status_item.text)
+        self.assertEqual(status_item.text, "可用 2/总数 5 · 不可用 2")
+        for term in ("运行", "降级", "等待"):
+            self.assertNotIn(term, icon.title)
+            self.assertNotIn(term, status_item.text)
         previous_updates = icon.updates
         self.status["mappings"] = [{"status": "stopped"}]
-        wait_for(lambda: "运行 0/1" in icon.title)
+        wait_for(lambda: "可用 0/总数 1" in icon.title)
+        self.assertIn("不可用 0", icon.title)
         self.assertGreater(icon.updates, previous_updates)
 
-    def test_running_tunnel_does_not_depend_on_target_readiness(self):
-        self.status["mappings"] = [
-            {"status": "running", "health": {"tunnel_ok": True, "target_ok": False}},
-            {"status": "running", "health": {"tunnel_ok": True, "target_ok": None}},
-            {"status": "running", "health": {"tunnel_ok": True, "target_ok": True}},
-            {"status": "degraded"}, {"status": "error"},
+    def test_only_active_complete_health_counts_as_available(self):
+        healthy = {"ok": True, "tunnel_ok": True, "target_ok": True}
+        cases = [
+            {"status": "running", "health": {**healthy, "target_ok": False}},
+            {"status": "running", "health": {**healthy, "target_ok": None}},
+            {"status": "running", "health": {**healthy, "tunnel_ok": False}},
+            {"status": "running", "health": {**healthy, "ok": False}},
+            {"status": "running", "health": {**healthy, "ok": 1}},
+            {"status": "running", "health": {**healthy, "target_ok": 1}},
+            {"status": "running", "health": {"ok": True}},
+            {"status": "running", "health": None},
+            {"status": "running", "health": []},
+            {"status": "running", "health": healthy, "config_changed": True},
+            {"status": "running", "health": healthy, "error": "check failed"},
+            *[{"status": status, "health": healthy} for status in ("degraded", "error", "stopped", "starting", "stopping")],
         ]
+        for mapping in cases:
+            with self.subTest(mapping=mapping):
+                self.status["mappings"] = [mapping]
+                self.controller._refresh_status()
+                unavailable = int(mapping["status"] in {"running", "degraded", "error"})
+                self.assertEqual(self.controller._status_text(), f"可用 0/总数 1 · 不可用 {unavailable}")
+        self.status["mappings"] = [{"status": "running", "health": healthy}]
+        self.controller._refresh_status()
+        self.assertEqual(self.controller._status_text(), "可用 1/总数 1 · 不可用 0")
+
+    def test_target_recovery_updates_available_count(self):
+        self.status["mappings"] = [{"status": "running", "health": {"ok": False, "tunnel_ok": True, "target_ok": False}}]
         self.controller.start()
         icon = self.controller._icon
-        wait_for(lambda: "运行 3/5" in icon.title)
-        self.assertIn("3 运行中 / 5 总数", self.controller._status_text())
-        self.assertIn("2 需关注", self.controller._status_text())
-        self.assertNotIn("等待", icon.title)
-        self.assertNotIn("等待", self.controller._status_text())
+        wait_for(lambda: "可用 0/总数 1 · 不可用 1" in icon.title)
+        self.status["mappings"] = [{"status": "running", "health": {"ok": True, "tunnel_ok": True, "target_ok": True}}]
+        wait_for(lambda: "可用 1/总数 1 · 不可用 0" in icon.title)
+        self.assertEqual(self.exit_calls, [])
 
     def test_exit_runs_off_callback_thread_and_only_once(self):
         entered, release, finished = threading.Event(), threading.Event(), threading.Event()
@@ -273,15 +297,15 @@ class TrayTests(unittest.TestCase):
         def get_status():
             if problem["fail"]:
                 raise ValueError("state failed")
-            return {"mappings": [{"status": "running"}]}
+            return {"mappings": [{"status": "running", "health": {"ok": True, "tunnel_ok": True, "target_ok": True}}]}
 
         self.controller.get_status = get_status
         with self.assertLogs(tray.LOG, level="ERROR"):
             self.controller.start()
             wait_for(lambda: "状态读取失败" in self.controller._icon.title)
         problem["fail"] = False
-        wait_for(lambda: "运行 1/1" in self.controller._icon.title)
-        self.assertIn("1 运行中", self.controller._status_text())
+        wait_for(lambda: "可用 1/总数 1" in self.controller._icon.title)
+        self.assertIn("可用 1/总数 1", self.controller._status_text())
 
     def test_stop_before_start_and_non_windows_error(self):
         self.controller.stop()
