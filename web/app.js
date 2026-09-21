@@ -35,7 +35,8 @@
     copy: ["M8 8h13v13H8z M16 8V3H3v13h5"],
     chevron: ["m9 5 7 7-7 7"],
   };
-  const STATUS = { stopped: "已停止", starting: "启动中", running: "运行中", stopping: "停止中", error: "启动异常", degraded: "需要检查" };
+  const STATUS = { stopped: "已停止", starting: "启动中", running: "运行中", stopping: "停止中", error: "启动异常", degraded: "需要检查", waiting: "等待目标服务" };
+  const WAITING_GUIDANCE = "目标服务启动后即可使用，无需重启隧道；点击“检查”更新状态。";
   const ROLES = { source: "访问入口", relay: "本机中转", local: "本机中转", gateway: "SSH 跳板", jump: "SSH 跳板", target: "目标服务", destination: "目标服务" };
   const state = {
     data: { hosts: [], mappings: [], ssh_config: "" }, token: null, sessionPromise: null,
@@ -91,19 +92,50 @@
     if (Number.isNaN(date.getTime())) return String(value);
     return date.toLocaleString("zh-CN", full ? { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false } : { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
   }
-  function statusBadge(status) { return el("span", `status-badge ${STATUS[status] ? status : "stopped"}`, STATUS[status] || status || "未知状态"); }
+  function isWaitingForTarget(mapping) {
+    return mapping.status === "degraded" && !mapping.error && !mapping.config_changed && mapping.health?.tunnel_ok === true && mapping.health?.target_ok === false;
+  }
+  function isTunnelEstablished(mapping) { return mapping.status === "running" || isWaitingForTarget(mapping); }
+  function needsAttention(mapping) { return ["error", "degraded"].includes(mapping.status) && !isWaitingForTarget(mapping); }
+  function mappingStatus(mapping) { return isWaitingForTarget(mapping) ? "waiting" : mapping.status; }
+  function matchesStatusFilter(mapping, filter) {
+    if (filter === "all") return true;
+    if (filter === "running") return isTunnelEstablished(mapping);
+    if (filter === "waiting") return isWaitingForTarget(mapping);
+    if (filter === "attention") return needsAttention(mapping);
+    return filter === mapping.status;
+  }
+  function mappingActionFeedback(mapping, action) {
+    if (action !== "stop" && isWaitingForTarget(mapping)) {
+      return { message: `隧道已建立，等待目标服务。${WAITING_GUIDANCE}`, warning: true };
+    }
+    const incomplete = mapping.status === "degraded" && !mapping.error && !mapping.config_changed && (mapping.health?.tunnel_ok === null || mapping.health?.target_ok === null);
+    if (action !== "stop" && incomplete) {
+      return { message: mapping.health?.summary || "隧道状态检查未完成，请稍后点击“检查”重试。", warning: true };
+    }
+    if (action === "check") {
+      if (mapping.status === "error") return { message: mapping.error || mapping.health?.summary || "映射启动异常，请查看诊断信息。", error: true };
+      if (mapping.status === "stopped") return { message: "映射尚未启动，未执行连接检查。请先启动映射。", warning: true };
+      return { message: mapping.health?.summary || "连接检查已完成", error: mapping.health?.ok === false || needsAttention(mapping) };
+    }
+    if (["error", "degraded"].includes(mapping.status)) {
+      return { message: mapping.error || mapping.health?.summary || (action === "start" ? "隧道未能成功启动，请查看诊断信息。" : "隧道未能停止，请查看诊断信息。"), error: true };
+    }
+    return { message: action === "start" ? `已启动「${mapping.name}」` : `已停止「${mapping.name}」` };
+  }
+  function statusBadge(mapping) { const status = mappingStatus(mapping); return el("span", `status-badge ${STATUS[status] ? status : "stopped"}`, STATUS[status] || status || "未知状态"); }
   function setBusyButton(node, busy, text) {
     node.disabled = busy;
     node.classList.toggle("spin", busy);
     if (text) { node.replaceChildren(icon(busy ? "refresh" : "check"), el("span", "", text)); }
   }
-  function showToast(message, error = false) {
-    const toast = el("div", `toast${error ? " error" : ""}`);
+  function showToast(message, error = false, warning = false) {
+    const toast = el("div", `toast${error ? " error" : warning ? " warning" : ""}`);
     toast.setAttribute("role", error ? "alert" : "status");
-    toast.append(icon(error ? "alert" : "checkCircle"), el("span", "", message), button("", "close", "icon-button", () => toast.remove(), "关闭提示"));
+    toast.append(icon(error ? "alert" : warning ? "clock" : "checkCircle"), el("span", "", message), button("", "close", "icon-button", () => toast.remove(), "关闭提示"));
     $("toastRegion").append(toast);
     while ($("toastRegion").children.length > 4) $("toastRegion").firstElementChild.remove();
-    setTimeout(() => toast.remove(), error ? 14000 : 6000);
+    setTimeout(() => toast.remove(), error ? 14000 : warning ? 10000 : 6000);
   }
   async function sessionToken() {
     if (state.token) return state.token;
@@ -177,8 +209,10 @@
     const { hosts, mappings } = state.data;
     $("statHosts").textContent = hosts.filter((h) => h.id !== "local").length;
     $("statTotal").textContent = mappings.length;
-    $("statRunning").textContent = mappings.filter((m) => m.status === "running").length;
-    const attention = mappings.filter((m) => ["error", "degraded"].includes(m.status)).length;
+    $("statRunning").textContent = mappings.filter(isTunnelEstablished).length;
+    const waiting = mappings.filter(isWaitingForTarget).length;
+    $("runningHint").textContent = waiting ? `其中 ${waiting} 条等待目标服务` : "后台 SSH 隧道";
+    const attention = mappings.filter(needsAttention).length;
     $("statAttention").textContent = attention;
     $("statAttention").style.color = attention ? "var(--danger)" : "";
     $("attentionHint").textContent = attention ? "查看错误信息或运行连接检查" : "暂无异常映射";
@@ -234,7 +268,7 @@
     const filter = $("statusFilter").value;
     const mappings = state.data.mappings.filter((m) => {
       const matchesSearch = [m.name, m.source_host, m.target_host, m.source_port, m.target_port, hostLabel(m.source_host), hostLabel(m.target_host)].join(" ").toLowerCase().includes(search);
-      return matchesSearch && (filter === "all" || filter === m.status || (filter === "attention" && ["error", "degraded"].includes(m.status)));
+      return matchesSearch && matchesStatusFilter(m, filter);
     });
     if (!mappings.length) {
       const noMappings = !state.data.mappings.length;
@@ -247,13 +281,13 @@
     }
     for (const mapping of mappings) {
       const row = el("article", `mapping-row${state.selected === mapping.id ? " selected" : ""}`);
-      row.setAttribute("aria-label", `${mapping.name || "未命名映射"}，${STATUS[mapping.status] || mapping.status}`);
+      row.setAttribute("aria-label", `${mapping.name || "未命名映射"}，${STATUS[mappingStatus(mapping)] || mapping.status}`);
       row.addEventListener("click", (event) => { if (!event.target.closest("button")) selectMapping(mapping.id); });
       const top = el("div", "mapping-row-top");
       const mark = el("span", "mapping-icon"); mark.append(icon("route"));
       const name = el("h3", "mapping-name");
       name.append(button(mapping.name || `${hostLabel(mapping.source_host)} → ${hostLabel(mapping.target_host)}`, "", "mapping-name-button", () => selectMapping(mapping.id)));
-      top.append(mark, name, statusBadge(mapping.status));
+      top.append(mark, name, statusBadge(mapping));
       const endpoints = el("div", "mapping-endpoints");
       const sep = el("span", "endpoint-separator"); sep.append(icon("arrowRight"), el("span", "relay-label", "经本机"), icon("arrowRight"));
       endpoints.append(endpoint(mapping.source_host, mapping.source_port), sep, endpoint(mapping.target_host, mapping.target_port));
@@ -273,6 +307,7 @@
       remove.disabled = !!busy || active;
       actions.append(toggle, check, edit, remove); bottom.append(actions);
       row.append(top, endpoints, bottom);
+      if (isWaitingForTarget(mapping)) row.append(el("div", "mapping-waiting", `隧道已建立。${WAITING_GUIDANCE}`));
       if (mapping.error) row.append(el("div", "mapping-error", mapping.error));
       list.append(row);
     }
@@ -285,7 +320,7 @@
       const empty = emptyState("连接信息，一目了然", "选择一条映射，即可查看实际中转路径、连接状态和最近日志。", "topology");
       empty.style.minHeight = "235px"; empty.style.padding = "25px 3px"; container.append(empty); return;
     }
-    const top = el("div", "detail-name-row"); top.append(el("h3", "", mapping.name), statusBadge(mapping.status));
+    const top = el("div", "detail-name-row"); top.append(el("h3", "", mapping.name), statusBadge(mapping));
     container.append(top, el("p", "detail-desc", mapping.plan?.description || "通过本机建立 SSH 隧道，将访问入口转发到目标服务。"));
     container.append(kv("访问地址", `${mapping.bind_address || "127.0.0.1"}:${mapping.source_port}`));
     container.append(kv("目标地址", `${mapping.target_address || "127.0.0.1"}:${mapping.target_port}`));
@@ -298,9 +333,18 @@
       route.append(row);
     }); container.append(route);
     if (mapping.health) {
-      const health = el("div", `health-box${mapping.health.ok ? "" : " unhealthy"}`);
-      const title = el("div", "health-title"); title.append(icon(mapping.health.ok ? "checkCircle" : "alert"), el("span", "", mapping.health.summary || (mapping.health.ok ? "连接检查通过" : "连接检查未通过")));
+      const waiting = isWaitingForTarget(mapping);
+      const health = el("div", `health-box${waiting ? " waiting" : mapping.health.ok ? "" : " unhealthy"}`);
+      const title = el("div", "health-title"); title.append(icon(waiting ? "clock" : mapping.health.ok ? "checkCircle" : "alert"), el("span", "", waiting ? "隧道已建立，等待目标服务" : mapping.health.summary || (mapping.health.ok ? "连接检查通过" : "连接检查未通过")));
       health.append(title);
+      for (const [field, label, yes, no] of [["tunnel_ok", "SSH 隧道", "已建立", "检查未通过"], ["target_ok", "目标服务", "可达", waiting ? "尚未就绪" : "不可达"]]) {
+        if (typeof mapping.health[field] !== "boolean") continue;
+        const ok = mapping.health[field];
+        const row = el("div", `health-check-row ${ok ? "ready" : waiting ? "pending" : "failed"}`);
+        row.append(el("span", "", label), el("strong", "", ok ? yes : no));
+        health.append(row);
+      }
+      if (waiting) health.append(el("p", "waiting-guidance", WAITING_GUIDANCE));
       for (const item of Array.isArray(mapping.health.details) ? mapping.health.details : []) health.append(el("p", "", typeof item === "string" ? item : JSON.stringify(item)));
       health.append(el("small", "", "检查涵盖隧道与目标可达性，业务健康需由应用自身验证。"));
       container.append(health);
@@ -330,9 +374,8 @@
       if (index >= 0) state.data.mappings[index] = updated;
       state.selected = mapping.id;
       if (action === "start") state.graphMode = "mapping";
-      const failed = action === "check" ? updated.health?.ok === false : ["error", "degraded"].includes(updated.status);
-      const message = action === "check" ? updated.health?.summary || "连接检查已完成" : action === "start" ? failed ? updated.error || "隧道未能成功启动，请查看诊断信息。" : `已启动「${mapping.name}」` : `已停止「${mapping.name}」`;
-      showToast(message, failed);
+      const feedback = mappingActionFeedback(updated, action);
+      showToast(feedback.message, feedback.error, feedback.warning);
     } catch (error) { showToast(error.message, true); }
     finally { state.busy.delete(mapping.id); state.renderSignature = ""; render(); await refreshState(); }
   }
@@ -534,7 +577,7 @@
     addLabel({ x: 14, y: 89, class: "node-kind" }, ROLES[role] || role || (local ? "本机中转" : "SSH 设备"), 92, 12);
     group.append(svgEl("text", { x: 206, y: 89, class: "port-label", "text-anchor": "end" }, port ? `:${port}` : local ? "RELAY" : `SSH :${h.port || 22}`));
     if (step !== undefined) group.append(svgEl("text", { x: 2, y: -11, class: "graph-step" }, String(step + 1).padStart(2, "0")));
-    if (status === "running") group.append(svgEl("circle", { cx: 204, cy: 24, r: 3, fill: "#36d4b7" }));
+    if (["running", "waiting"].includes(status)) group.append(svgEl("circle", { cx: 204, cy: 24, r: 3, fill: status === "waiting" ? "#eab96d" : "#36d4b7" }));
     const navigate = () => { showView("hosts"); const card = Array.from($("hostList").children).find((n) => n.dataset.host === host); if (card) { card.scrollIntoView({ block: "center", behavior: "smooth" }); card.animate([{ borderColor: "#36d4b7" }, { borderColor: "" }], { duration: 1200 }); } };
     group.addEventListener("click", navigate); group.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); navigate(); } });
     svg.append(group);
@@ -543,7 +586,7 @@
   function renderGraph() {
     const availableWidth = graphViewportWidth();
     if (availableWidth <= 0) return;
-    const signature = JSON.stringify([availableWidth, state.graphMode, state.selected, state.data.hosts, state.data.mappings.map((m) => ({ id: m.id, status: m.status, route: routeFor(m), relay: m.relay_port }))]);
+    const signature = JSON.stringify([availableWidth, state.graphMode, state.selected, state.data.hosts, state.data.mappings.map((m) => ({ id: m.id, status: mappingStatus(m), route: routeFor(m), relay: m.relay_port }))]);
     if (signature === state.graphSignature) return;
     state.graphSignature = signature;
     document.querySelectorAll("[data-graph]").forEach((node) => { const active = node.dataset.graph === state.graphMode; node.classList.toggle("active", active); node.setAttribute("aria-pressed", String(active)); });
@@ -558,7 +601,8 @@
     const route = routeFor(mapping);
     const layout = mappingGraphLayout(route, graphViewportWidth());
     const svg = makeSvgBase(layout);
-    const running = mapping.status === "running";
+    const running = isTunnelEstablished(mapping);
+    const waiting = isWaitingForTarget(mapping);
     const { coordinates, width } = layout;
     for (let i = 1; i < coordinates.length; i++) {
       const prev = coordinates[i - 1], next = coordinates[i]; const middle = (prev.x + next.x) / 2;
@@ -566,9 +610,9 @@
       const label = prev.host === "local" ? "SSH 正向转发" : next.host === "local" ? "SSH 反向转发" : "SSH 连接";
       svg.append(svgEl("text", { x: middle, y: prev.y - 13, class: `graph-edge-label${running ? " mapping" : ""}`, "text-anchor": "middle" }, label));
     }
-    coordinates.forEach((node) => drawNode(svg, { ...node, status: mapping.status }));
-    svg.append(svgEl("text", { x: width / 2, y: 239, class: "graph-column-label", "text-anchor": "middle" }, running ? "TUNNEL ACTIVE  /  端口数据流" : "PLANNED ROUTE  /  规划的数据路径"));
-    $("graphCaption").textContent = `${hostLabel(mapping.source_host)} 上访问 ${mapping.bind_address || "127.0.0.1"}:${mapping.source_port} → ${hostLabel(mapping.target_host)} 的 ${mapping.target_address || "127.0.0.1"}:${mapping.target_port}。${running ? "隧道已启动。" : "当前显示规划路径。"}`;
+    coordinates.forEach((node, index) => drawNode(svg, { ...node, status: waiting && index === coordinates.length - 1 ? "waiting" : running ? "running" : mapping.status }));
+    svg.append(svgEl("text", { x: width / 2, y: 239, class: "graph-column-label", "text-anchor": "middle" }, waiting ? "TUNNEL ACTIVE  /  等待目标服务" : running ? "TUNNEL ACTIVE  /  端口数据流" : "PLANNED ROUTE  /  规划的数据路径"));
+    $("graphCaption").textContent = `${hostLabel(mapping.source_host)} 上访问 ${mapping.bind_address || "127.0.0.1"}:${mapping.source_port} → ${hostLabel(mapping.target_host)} 的 ${mapping.target_address || "127.0.0.1"}:${mapping.target_port}。${waiting ? `隧道已建立。${WAITING_GUIDANCE}` : running ? "隧道已启动。" : "当前显示规划路径。"}`;
   }
   function renderSSHGraph() {
     const all = state.data.hosts.length ? state.data.hosts : [{ id: "local", alias: "local", label: "本机", hostname: "127.0.0.1" }];

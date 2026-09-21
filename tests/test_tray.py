@@ -153,6 +153,45 @@ class TrayTests(unittest.TestCase):
         wait_for(lambda: "运行 0/1" in icon.title)
         self.assertGreater(icon.updates, previous_updates)
 
+    def test_waiting_target_counts_as_running_tunnel_and_recovers(self):
+        waiting = {"status": "degraded", "error": None,
+                   "health": {"tunnel_ok": True, "target_ok": False}}
+        self.status["mappings"] = [waiting, {"status": "running"},
+                                   {"status": "degraded"}, {"status": "error"}]
+        self.controller.start()
+        icon = self.controller._icon
+        wait_for(lambda: "等待服务 1" in icon.title)
+        self.assertIn("运行 2/4", icon.title)
+        self.assertIn("降级 1", icon.title)
+        self.assertIn("异常 1", icon.title)
+        self.assertIn("1 等待服务", self.controller._status_text())
+        self.assertIn("2 需关注", self.controller._status_text())
+        self.status["mappings"] = [{"status": "running", "health": {"tunnel_ok": True, "target_ok": True}}]
+        wait_for(lambda: "运行 1/1" in icon.title)
+        self.assertIn("等待服务 0", icon.title)
+        self.assertIn("0 需关注", self.controller._status_text())
+
+    def test_waiting_target_requires_explicit_health_and_unchanged_config(self):
+        cases = [
+            {"status": "degraded", "health": {"tunnel_ok": True, "target_ok": False}, "config_changed": True},
+            {"status": "degraded", "health": {"tunnel_ok": False, "target_ok": False}},
+            {"status": "degraded", "health": {"tunnel_ok": 1, "target_ok": False}},
+            {"status": "degraded", "health": {"tunnel_ok": True, "target_ok": 0}},
+            {"status": "degraded", "health": {"tunnel_ok": True}},
+            {"status": "degraded", "health": None},
+            {"status": "degraded", "health": []},
+            {"status": "error", "health": {"tunnel_ok": True, "target_ok": False}},
+            {"status": "stopped", "health": {"tunnel_ok": True, "target_ok": False}},
+        ]
+        self.status["mappings"] = cases
+        self.controller.start()
+        icon = self.controller._icon
+        wait_for(lambda: "运行 0/9" in icon.title)
+        self.assertIn("等待服务 0", icon.title)
+        self.assertIn("降级 7", icon.title)
+        self.assertIn("异常 1", icon.title)
+        self.assertIn("8 需关注", self.controller._status_text())
+
     def test_exit_runs_off_callback_thread_and_only_once(self):
         entered, release, finished = threading.Event(), threading.Event(), threading.Event()
 

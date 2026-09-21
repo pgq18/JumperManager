@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import socket
+import subprocess
 import threading
 import unittest
 from unittest.mock import MagicMock, patch
@@ -121,10 +122,11 @@ class EngineTests(unittest.TestCase):
 
     def test_conflicting_source_fails_without_spawning(self):
         mapping = self.manager.create(payload())
-        with patch.object(self.manager, "_endpoint_check", side_effect=[{"ok": True}, {"ok": False, "message": "Address already in use"}]), patch.object(self.manager, "_spawn") as spawn:
+        with patch.object(self.manager, "_endpoint_check", return_value={"ok": False, "message": "Address already in use"}) as probe, patch.object(self.manager, "_spawn") as spawn:
             with self.assertRaisesRegex(RuntimeError, "监听端口"):
                 self.manager.start(mapping["id"])
             spawn.assert_not_called()
+            probe.assert_called_once_with("server-a", "available", "127.0.0.1", 51051)
         self.assertEqual(self.manager.state()["mappings"][0]["status"], "error")
 
     def test_partial_remote_start_cleans_first_leg(self):
@@ -166,7 +168,186 @@ class EngineTests(unittest.TestCase):
             result = self.manager.check(mapping["id"])
         self.assertEqual(result["status"], "degraded")
         self.assertFalse(result["health"]["ok"])
+        self.assertTrue(result["health"]["tunnel_ok"])
+        self.assertFalse(result["health"]["target_ok"])
+        self.assertIsNone(result["error"])
         self.manager._processes.clear()
+
+    def test_target_can_start_after_local_tunnel_without_restarting_it(self):
+        # Reserve the target address without listening: connect must fail until
+        # the service below starts, while no other test can steal its port.
+        target_listener = socket.socket()
+        target_listener.bind(("127.0.0.1", 0))
+        target_port = target_listener.getsockname()[1]
+        with socket.socket() as reservation:
+            reservation.bind(("127.0.0.1", 0))
+            source_port = reservation.getsockname()[1]
+        mapping = self.manager.create(payload(source_host="local", source_port=source_port,
+                                              target_host="local", target_port=target_port))
+        finished = threading.Event()
+        thread = None
+        try:
+            result = self.manager.start(mapping["id"])
+            self.assertEqual(result["status"], "degraded")
+            self.assertTrue(result["health"]["tunnel_ok"])
+            self.assertFalse(result["health"]["target_ok"])
+            self.assertFalse(result["health"]["ok"])
+            self.assertIsNone(result["error"])
+            self.assertIn("无需重启隧道", result["health"]["summary"])
+            relay = self.manager._relays[mapping["id"]]
+            self.assertFalse(relay.closed.is_set())
+
+            target_listener.listen(8)
+            target_listener.settimeout(0.2)
+
+            def echo():
+                while not finished.is_set():
+                    try:
+                        client, _ = target_listener.accept()
+                    except socket.timeout:
+                        continue
+                    except OSError:
+                        break
+                    with client:
+                        client.settimeout(2)
+                        try:
+                            data = client.recv(1024)
+                            if data:
+                                client.sendall(data)
+                        except OSError:
+                            pass
+
+            thread = threading.Thread(target=echo, daemon=True)
+            thread.start()
+            # Exercise data flow before refreshing health: check is not needed
+            # to reactivate or recreate either the listener or relay.
+            with socket.create_connection(("127.0.0.1", source_port), timeout=3) as client:
+                client.sendall(b"service-started-later")
+                self.assertEqual(client.recv(100), b"service-started-later")
+            self.assertIs(self.manager._relays[mapping["id"]], relay)
+            healthy = self.manager.check(mapping["id"])
+            self.assertEqual(healthy["status"], "running")
+            self.assertTrue(healthy["health"]["tunnel_ok"])
+            self.assertTrue(healthy["health"]["target_ok"])
+            self.assertTrue(healthy["health"]["ok"])
+            self.assertIsNone(healthy["error"])
+        finally:
+            self.manager.stop(mapping["id"])
+            finished.set()
+            target_listener.close()
+            if thread:
+                thread.join(timeout=3)
+
+    def test_remote_target_down_up_keeps_both_ready_ssh_legs(self):
+        mapping = self.manager.create(payload())
+        entries = []
+        target_state = {"ready": False, "failure": None}
+
+        def spawn(mapping_id, alias, kind, spec):
+            process = MagicMock()
+            process.poll.return_value = None
+            entry = {"process": process, "job": MagicMock(),
+                     "record": {"pid": 100 + len(entries), "marker": "test-only"},
+                     "log": self.root / f"missing-{kind}", "offset": 0, "alias": alias, "kind": kind}
+            entries.append(entry)
+            self.manager._processes[mapping_id] = list(entries)
+            return entry
+
+        def probe(host, operation, address, port):
+            if host == "server-b" and operation == "connect":
+                self.assertEqual(len(entries), 2, "Target health is checked only after both SSH legs exist")
+                if target_state["failure"]:
+                    raise target_state["failure"]
+                return {"ok": target_state["ready"], "message": "Connection refused"}
+            return {"ok": True}
+
+        with patch.object(self.manager, "_spawn", side_effect=spawn) as spawned, \
+             patch.object(self.manager, "_wait_ready") as ready, \
+             patch.object(self.manager, "_endpoint_check", side_effect=probe), \
+             patch("jumper_manager.engine.terminate_owned", return_value=True) as terminate:
+            try:
+                result = self.manager.start(mapping["id"])
+                self.assertEqual(result["status"], "degraded")
+                self.assertTrue(result["health"]["tunnel_ok"])
+                self.assertFalse(result["health"]["target_ok"])
+                self.assertIsNone(result["error"])
+                self.assertEqual(ready.call_count, 2)
+                self.assertEqual([entry["kind"] for entry in entries], ["-L", "-R"])
+                for reachable in (True, False, True):
+                    target_state["ready"] = reachable
+                    checked = self.manager.check(mapping["id"])
+                    self.assertEqual(checked["status"], "running" if reachable else "degraded")
+                    self.assertTrue(checked["health"]["tunnel_ok"])
+                    self.assertEqual(checked["health"]["target_ok"], reachable)
+                    self.assertIsNone(checked["error"])
+                    self.assertEqual(self.manager._processes[mapping["id"]], entries)
+                target_state["failure"] = OSError("Could not launch the diagnostic SSH process")
+                checked = self.manager.check(mapping["id"])
+                self.assertEqual(checked["status"], "degraded")
+                self.assertTrue(checked["health"]["tunnel_ok"])
+                self.assertIsNone(checked["health"]["target_ok"])
+                self.assertFalse(checked["health"]["ok"])
+                self.assertIn("无法确认", checked["health"]["summary"])
+                self.assertIn("diagnostic SSH", checked["error"])
+                self.assertIn("diagnostic SSH", " ".join(checked["health"]["details"]))
+                self.assertEqual(spawned.call_count, 2)
+                terminate.assert_not_called()
+            finally:
+                self.manager.stop(mapping["id"])
+            self.assertEqual(terminate.call_count, 2)
+
+    def test_remote_probe_distinguishes_refused_connection_from_failed_diagnostic(self):
+        for output, error, expected in [
+                ('JM_RESULT:{"ok":false,"errno":111,"message":"Connection refused"}', "", True),
+                ("", "python3: command not found", False),
+                ("", "Permission denied (publickey)", False),
+                ("JM_RESULT:[]", "", False)]:
+            with self.subTest(output=output, error=error), \
+                 patch.object(self.manager, "_ssh_args", return_value=["ssh", "-T"]), \
+                 patch.object(self.manager, "_run", return_value=subprocess.CompletedProcess([], 1, output, error)):
+                result = self.manager._endpoint_check("server-b", "connect", "127.0.0.1", 50051)
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["checked"], expected)
+
+    def test_ready_failure_still_cleans_every_started_ssh_leg(self):
+        mapping = self.manager.create(payload())
+        entries = []
+
+        def spawn(mapping_id, alias, kind, spec):
+            process = MagicMock()
+            process.poll.return_value = None
+            entry = {"process": process, "job": MagicMock(), "record": {"pid": 100 + len(entries)},
+                     "log": self.root / "missing", "offset": 0, "alias": alias, "kind": kind}
+            entries.append(entry)
+            self.manager._processes[mapping_id] = list(entries)
+            return entry
+
+        with patch.object(self.manager, "_endpoint_check", return_value={"ok": True}), \
+             patch.object(self.manager, "_spawn", side_effect=spawn), \
+             patch.object(self.manager, "_wait_ready", side_effect=[None, RuntimeError("remote port forwarding failed")]), \
+             patch("jumper_manager.engine.terminate_owned", return_value=True) as terminate:
+            with self.assertRaisesRegex(RuntimeError, "remote port forwarding failed"):
+                self.manager.start(mapping["id"])
+            self.assertEqual(terminate.call_count, 2)
+        self.assertFalse(self.manager._processes)
+        self.assertEqual(self.manager._get(mapping["id"])["status"], "error")
+        self.assertNotIn("relay_port", self.manager._get(mapping["id"]))
+
+    def test_unexpected_post_start_diagnostic_error_does_not_remove_listener(self):
+        with socket.socket() as reservation:
+            reservation.bind(("127.0.0.1", 0))
+            source_port = reservation.getsockname()[1]
+        mapping = self.manager.create(payload(source_host="local", source_port=source_port,
+                                              target_host="local", target_port=source_port + 1 if source_port < 65535 else source_port - 1))
+        with patch.object(self.manager, "check", side_effect=TypeError("invalid diagnostic response")):
+            result = self.manager.start(mapping["id"])
+        self.assertEqual(result["status"], "degraded")
+        self.assertIsNone(result["error"])
+        self.assertIsNone(result["health"]["target_ok"])
+        self.assertIn("已保留隧道", result["health"]["summary"])
+        relay = self.manager._relays[mapping["id"]]
+        self.assertFalse(relay.closed.is_set())
+        self.assertEqual(relay.listener.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN), 1)
 
     def test_local_relay_roundtrip_and_stop(self):
         listener = socket.socket()

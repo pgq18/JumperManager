@@ -1165,7 +1165,7 @@ h1 {
   background: #f08c8d0b;
 }
 
-.status-badge.starting,.status-badge.stopping {
+.status-badge.starting,.status-badge.stopping,.status-badge.waiting {
   color: var(--warning);
   background: #eab96d0a;
   border-color: #eab96d25;
@@ -1264,7 +1264,7 @@ h1 {
   height: 17px;
 }
 
-.mapping-error {
+.mapping-error,.mapping-waiting {
   color: var(--danger);
   font-size: 14px;
   padding: 12px 14px;
@@ -1273,6 +1273,11 @@ h1 {
   line-height: 1.6;
   margin-top: 11px;
   overflow-wrap: anywhere;
+}
+
+.mapping-waiting {
+  color: var(--warning);
+  background: #eab96d09;
 }
 
 .empty-state {
@@ -1458,6 +1463,40 @@ h1 {
 }
 
 .health-box.unhealthy .health-title {
+  color: var(--danger);
+}
+
+.health-box.waiting {
+  background: #eab96d08;
+  border-color: #eab96d25;
+}
+
+.health-box.waiting .health-title {
+  color: var(--warning);
+}
+
+.health-check-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 7px;
+  color: var(--muted);
+}
+
+.health-check-row strong {
+  font-weight: 500;
+}
+
+.health-check-row.ready strong {
+  color: var(--accent);
+}
+
+.health-check-row.pending strong {
+  color: var(--warning);
+}
+
+.health-check-row.failed strong {
   color: var(--danger);
 }
 
@@ -2215,6 +2254,16 @@ h1 {
 
 .toast.error>.icon {
   color: var(--danger);
+}
+
+.toast.warning {
+  background: #302a20;
+  border-color: #79613e;
+  color: #edd7b6;
+}
+
+.toast.warning>.icon {
+  color: var(--warning);
 }
 
 .toast .icon-button {
