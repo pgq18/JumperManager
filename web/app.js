@@ -3,6 +3,8 @@
 (() => {
   const $ = (id) => document.getElementById(id);
   const SVG_NS = "http://www.w3.org/2000/svg";
+  const GRAPH = { nodeWidth: 220, nodeHeight: 108, edgeGap: 144, rowGap: 32, paddingX: 32, paddingTop: 64, paddingBottom: 36, minScale: 1, maxScale: 1.1 };
+  let graphResizeFrame = 0, graphObservedWidth = 0;
   const ICONS = {
     topology: ["M3 5h6v5H3z M15 14h6v5h-6z M3 14h6v5H3z M6 10v4 M9 7.5h9V14"],
     server: ["M4 3h16v7H4z M4 14h16v7H4z M7 6.5h.01 M7 17.5h.01 M11 6.5h6 M11 17.5h6"],
@@ -169,6 +171,7 @@
     history.replaceState(null, "", `#${view}`);
     if (view === "activity") renderActivity();
     if (view === "hosts") renderHosts();
+    if (view === "overview") scheduleGraphLayout();
   }
   function render() {
     const { hosts, mappings } = state.data;
@@ -420,9 +423,60 @@
     }
   }
 
-  function makeSvgBase(width, height) {
+  function graphViewportWidth() {
+    const viewport = $("graphViewport"), width = viewport.getBoundingClientRect().width;
+    // Reserve a scrollbar gutter even before a tall diagram creates its scrollbar.
+    // Measuring the fixed outer viewport avoids feedback from the SVG's size.
+    return Math.max(0, Math.floor(width - 20));
+  }
+  function graphCanvasSize(naturalWidth, naturalHeight, availableWidth) {
+    const scale = Math.max(GRAPH.minScale, Math.min(GRAPH.maxScale, availableWidth / naturalWidth || 1));
+    const width = Math.max(naturalWidth, availableWidth / scale);
+    return { width, height: naturalHeight, scale, pixelWidth: width * scale, pixelHeight: naturalHeight * scale };
+  }
+  function mappingGraphLayout(route, availableWidth) {
+    const count = Math.max(1, route.length);
+    const canvas = graphCanvasSize(count * GRAPH.nodeWidth + (count - 1) * GRAPH.edgeGap + 2 * GRAPH.paddingX, 300, availableWidth);
+    const gap = count > 1 ? (canvas.width - 2 * GRAPH.paddingX - GRAPH.nodeWidth) / (count - 1) : 0;
+    const coordinates = route.map((hop, index) => ({ ...hop, x: count === 1 ? canvas.width / 2 : GRAPH.paddingX + GRAPH.nodeWidth / 2 + index * gap, y: 140, step: index }));
+    return { ...canvas, coordinates };
+  }
+  function sshGraphLayout(hosts, availableWidth) {
+    const nodes = new Map([["local", { id: "local", depth: 0 }]]), edges = new Map();
+    for (const host of hosts) {
+      const path = hostPath(host);
+      path.forEach((id, index) => {
+        const existing = nodes.get(id);
+        if (!existing) nodes.set(id, { id, depth: index });
+        else if (id !== "local") existing.depth = Math.max(existing.depth, index);
+        if (index && id !== path[index - 1]) edges.set(`${path[index - 1]}\u0000${id}`, { from: path[index - 1], to: id });
+      });
+    }
+    const maxDepth = Math.max(0, ...Array.from(nodes.values()).map((node) => node.depth));
+    const columns = Array.from({ length: maxDepth + 1 }, () => []);
+    nodes.forEach((node) => columns[node.depth].push(node));
+    const maxRows = Math.max(1, ...columns.map((column) => column.length));
+    const naturalWidth = (maxDepth + 1) * GRAPH.nodeWidth + maxDepth * GRAPH.edgeGap + 2 * GRAPH.paddingX;
+    const naturalHeight = Math.max(300, GRAPH.paddingTop + maxRows * GRAPH.nodeHeight + (maxRows - 1) * GRAPH.rowGap + GRAPH.paddingBottom);
+    const canvas = graphCanvasSize(naturalWidth, naturalHeight, availableWidth);
+    const gap = maxDepth ? (canvas.width - 2 * GRAPH.paddingX - GRAPH.nodeWidth) / maxDepth : 0;
+    const coords = new Map(), gateways = new Set(Array.from(edges.values(), (edge) => edge.from));
+    columns.forEach((column, depth) => {
+      // Keep small upstream columns visible near the first rows of a tall graph.
+      const offset = (Math.min(maxRows, 3) - Math.min(column.length, 3)) * (GRAPH.nodeHeight + GRAPH.rowGap) / 2;
+      column.forEach((node, index) => coords.set(node.id, {
+        host: node.id, x: maxDepth ? GRAPH.paddingX + GRAPH.nodeWidth / 2 + depth * gap : canvas.width / 2,
+        y: maxRows === 1 ? 140 : GRAPH.paddingTop + GRAPH.nodeHeight / 2 + offset + index * (GRAPH.nodeHeight + GRAPH.rowGap),
+        role: node.id === "local" ? "relay" : gateways.has(node.id) ? "gateway" : "SSH 设备",
+      }));
+    });
+    return { ...canvas, nodes, edges, columns, coords, maxDepth };
+  }
+  function makeSvgBase({ width, height, pixelWidth, pixelHeight }) {
     const svg = $("topologySvg"); svg.replaceChildren(); svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
-    svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
+    svg.setAttribute("preserveAspectRatio", "xMinYMin meet");
+    svg.setAttribute("width", String(pixelWidth)); svg.setAttribute("height", String(pixelHeight));
+    svg.style.width = `${pixelWidth}px`; svg.style.height = `${pixelHeight}px`;
     const defs = svgEl("defs");
     for (const [id, color] of [["arrow-ssh", "#42546f"], ["arrow-flow", "#36d4b7"], ["arrow-muted", "#6d829a"]]) {
       const marker = svgEl("marker", { id, markerWidth: 7, markerHeight: 7, refX: 6, refY: 3.5, orient: "auto", markerUnits: "userSpaceOnUse" });
@@ -431,28 +485,65 @@
     svg.append(defs); return svg;
   }
   function truncate(value, length = 23) { const text = String(value || ""); return text.length > length ? text.slice(0, length - 1) + "…" : text; }
+  function nodeLabel(value, maxWidth, fontSize) {
+    const text = String(value || ""), characters = Array.from(text);
+    // Conservative fallback for non-rendering DOMs; the live SVG is measured below.
+    const advance = (char) => fontSize * (/^[\x00-\x7F]$/.test(char) ? 1.1 : 2);
+    if (characters.reduce((width, char) => width + advance(char), 0) <= maxWidth) return text;
+    let label = "", width = fontSize;
+    for (const char of characters) { if (width + advance(char) > maxWidth) break; label += char; width += advance(char); }
+    return `${label}…`;
+  }
+  function fitSvgNodeLabel(node, value, maxWidth, fontSize) {
+    const text = String(value || ""), characters = Array.from(text);
+    const fallback = () => { node.textContent = nodeLabel(text, maxWidth, fontSize); };
+    if (typeof node.getComputedTextLength !== "function") { fallback(); return; }
+    try {
+      node.textContent = text;
+      const fullWidth = node.getComputedTextLength();
+      if (!Number.isFinite(fullWidth) || (text && fullWidth <= 0)) { fallback(); return; }
+      if (fullWidth <= maxWidth) return;
+      // Measure after attachment, using the actual CSS font, weight and spacing.
+      let low = 0, high = characters.length;
+      while (low < high) {
+        const middle = Math.ceil((low + high) / 2);
+        node.textContent = `${characters.slice(0, middle).join("")}…`;
+        if (node.getComputedTextLength() <= maxWidth) low = middle;
+        else high = middle - 1;
+      }
+      node.textContent = `${characters.slice(0, low).join("")}…`;
+    } catch { fallback(); }
+  }
   function drawNode(svg, info) {
     const { x, y, host, role, port, step, status, titleOverride } = info;
     const local = host === "local"; const h = hostById(host) || { id: host, alias: host, hostname: host };
-    const group = svgEl("g", { class: `graph-node${local ? " local" : ""}`, transform: `translate(${x - 91},${y - 43})`, tabindex: "0", role: "button", "aria-label": `查看设备 ${hostLabel(host)}${port ? `，端口 ${port}` : ""}` });
+    const group = svgEl("g", { class: `graph-node${local ? " local" : ""}`, transform: `translate(${x - GRAPH.nodeWidth / 2},${y - GRAPH.nodeHeight / 2})`, tabindex: "0", role: "button", "aria-label": `查看设备 ${hostLabel(host)}${port ? `，端口 ${port}` : ""}` });
+    const fittedLabels = [];
+    const addLabel = (attrs, value, maxWidth, fontSize) => {
+      const node = svgEl("text", attrs, nodeLabel(value, maxWidth, fontSize));
+      group.append(node); fittedLabels.push({ node, value, maxWidth, fontSize });
+    };
     group.append(svgEl("title", {}, `${hostLabel(host)}${port ? `:${port}` : ""}\n${local ? "本机中转" : `${h.user ? h.user + "@" : ""}${h.hostname}:${h.port || 22}`}`));
-    group.append(svgEl("rect", { class: "node-background", width: 182, height: 86, rx: 11, fill: local ? "#17312f" : "#162333", stroke: local ? "#32675c" : "#30435b", "stroke-width": 1 }));
-    group.append(svgEl("rect", { x: 13, y: 14, width: 29, height: 29, rx: 7, fill: local ? "#215145" : "#213348", stroke: local ? "#31775f" : "#33485f", "stroke-width": .6 }));
-    const smallIcon = svgEl("svg", { x: 20, y: 21, width: 15, height: 15, viewBox: "0 0 24 24", fill: "none", stroke: local ? "#59d8bc" : "#8aabce", "stroke-width": 1.6, "stroke-linecap": "round", "stroke-linejoin": "round" });
+    group.append(svgEl("rect", { class: "node-background", width: GRAPH.nodeWidth, height: GRAPH.nodeHeight, rx: 11, fill: local ? "#17312f" : "#162333", stroke: local ? "#32675c" : "#30435b", "stroke-width": 1 }));
+    group.append(svgEl("rect", { x: 15, y: 16, width: 32, height: 32, rx: 7, fill: local ? "#215145" : "#213348", stroke: local ? "#31775f" : "#33485f", "stroke-width": .6 }));
+    const smallIcon = svgEl("svg", { x: 23, y: 24, width: 16, height: 16, viewBox: "0 0 24 24", fill: "none", stroke: local ? "#59d8bc" : "#8aabce", "stroke-width": 1.6, "stroke-linecap": "round", "stroke-linejoin": "round" });
     for (const d of ICONS[local ? "laptop" : "server"]) smallIcon.append(svgEl("path", { d })); group.append(smallIcon);
-    group.append(svgEl("text", { x: 52, y: 27, class: "node-title" }, truncate(titleOverride || h.label || hostLabel(host), 16)));
-    group.append(svgEl("text", { x: 52, y: 42, class: "node-meta" }, truncate(local ? "127.0.0.1" : h.hostname || h.alias, 21)));
-    group.append(svgEl("line", { x1: 13, y1: 54, x2: 169, y2: 54, stroke: local ? "#2b4c44" : "#273b50", "stroke-width": .7 }));
-    group.append(svgEl("text", { x: 14, y: 72, class: "node-kind" }, ROLES[role] || role || (local ? "本机中转" : "SSH 设备")));
-    group.append(svgEl("text", { x: 167, y: 72, class: "port-label", "text-anchor": "end" }, port ? `:${port}` : local ? "RELAY" : `SSH :${h.port || 22}`));
+    addLabel({ x: 59, y: 31, class: "node-title" }, titleOverride || h.label || hostLabel(host), 135, 15);
+    addLabel({ x: 59, y: 50, class: "node-meta" }, local ? "127.0.0.1" : h.hostname || h.alias, 147, 12);
+    group.append(svgEl("line", { x1: 14, y1: 67, x2: 206, y2: 67, stroke: local ? "#2b4c44" : "#273b50", "stroke-width": .7 }));
+    addLabel({ x: 14, y: 89, class: "node-kind" }, ROLES[role] || role || (local ? "本机中转" : "SSH 设备"), 92, 12);
+    group.append(svgEl("text", { x: 206, y: 89, class: "port-label", "text-anchor": "end" }, port ? `:${port}` : local ? "RELAY" : `SSH :${h.port || 22}`));
     if (step !== undefined) group.append(svgEl("text", { x: 2, y: -11, class: "graph-step" }, String(step + 1).padStart(2, "0")));
-    if (status === "running") group.append(svgEl("circle", { cx: 167, cy: 22, r: 3, fill: "#36d4b7" }));
+    if (status === "running") group.append(svgEl("circle", { cx: 204, cy: 24, r: 3, fill: "#36d4b7" }));
     const navigate = () => { showView("hosts"); const card = Array.from($("hostList").children).find((n) => n.dataset.host === host); if (card) { card.scrollIntoView({ block: "center", behavior: "smooth" }); card.animate([{ borderColor: "#36d4b7" }, { borderColor: "" }], { duration: 1200 }); } };
     group.addEventListener("click", navigate); group.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); navigate(); } });
     svg.append(group);
+    fittedLabels.forEach(({ node, value, maxWidth, fontSize }) => fitSvgNodeLabel(node, value, maxWidth, fontSize));
   }
   function renderGraph() {
-    const signature = JSON.stringify([state.graphMode, state.selected, state.data.hosts, state.data.mappings.map((m) => ({ id: m.id, status: m.status, route: routeFor(m), relay: m.relay_port }))]);
+    const availableWidth = graphViewportWidth();
+    if (availableWidth <= 0) return;
+    const signature = JSON.stringify([availableWidth, state.graphMode, state.selected, state.data.hosts, state.data.mappings.map((m) => ({ id: m.id, status: m.status, route: routeFor(m), relay: m.relay_port }))]);
     if (signature === state.graphSignature) return;
     state.graphSignature = signature;
     document.querySelectorAll("[data-graph]").forEach((node) => { const active = node.dataset.graph === state.graphMode; node.classList.toggle("active", active); node.setAttribute("aria-pressed", String(active)); });
@@ -463,15 +554,15 @@
   }
   function renderMappingGraph() {
     const mapping = selectedMapping();
-    if (!mapping) { makeSvgBase(950, 300); $("graphEmpty").hidden = false; $("graphCaption").textContent = "新建映射后，可在这里查看完整的数据路径。"; return; }
+    if (!mapping) { makeSvgBase(graphCanvasSize(280, 300, graphViewportWidth())); $("graphEmpty").hidden = false; $("graphCaption").textContent = "新建映射后，可在这里查看完整的数据路径。"; return; }
     const route = routeFor(mapping);
-    const width = Math.max(950, route.length * 240 + 20), height = 285, gap = route.length > 1 ? (width - 240) / (route.length - 1) : 0;
-    const svg = makeSvgBase(width, height);
+    const layout = mappingGraphLayout(route, graphViewportWidth());
+    const svg = makeSvgBase(layout);
     const running = mapping.status === "running";
-    const coordinates = route.map((hop, index) => ({ ...hop, x: route.length === 1 ? width / 2 : 120 + index * gap, y: 140, step: index }));
+    const { coordinates, width } = layout;
     for (let i = 1; i < coordinates.length; i++) {
       const prev = coordinates[i - 1], next = coordinates[i]; const middle = (prev.x + next.x) / 2;
-      svg.append(svgEl("path", { class: `graph-edge mapping ${running ? "running" : "inactive"}`, d: `M${prev.x + 91} ${prev.y}H${next.x - 98}`, "marker-end": `url(#${running ? "arrow-flow" : "arrow-muted"})` }));
+      svg.append(svgEl("path", { class: `graph-edge mapping ${running ? "running" : "inactive"}`, d: `M${prev.x + GRAPH.nodeWidth / 2} ${prev.y}H${next.x - GRAPH.nodeWidth / 2 - 7}`, "marker-end": `url(#${running ? "arrow-flow" : "arrow-muted"})` }));
       const label = prev.host === "local" ? "SSH 正向转发" : next.host === "local" ? "SSH 反向转发" : "SSH 连接";
       svg.append(svgEl("text", { x: middle, y: prev.y - 13, class: `graph-edge-label${running ? " mapping" : ""}`, "text-anchor": "middle" }, label));
     }
@@ -481,34 +572,36 @@
   }
   function renderSSHGraph() {
     const all = state.data.hosts.length ? state.data.hosts : [{ id: "local", alias: "local", label: "本机", hostname: "127.0.0.1" }];
-    const nodes = new Map([["local", { id: "local", depth: 0 }]]), edges = new Map();
-    for (const host of all) {
-      const path = hostPath(host);
-      path.forEach((id, index) => {
-        const existing = nodes.get(id);
-        if (!existing) nodes.set(id, { id, depth: Math.min(index, 8) });
-        else if (id !== "local") existing.depth = Math.max(existing.depth, Math.min(index, 8));
-        if (index && id !== path[index - 1]) edges.set(`${path[index - 1]}\u0000${id}`, { from: path[index - 1], to: id });
-      });
-    }
-    const maxDepth = Math.max(1, ...Array.from(nodes.values()).map((n) => n.depth));
-    const columns = Array.from({ length: maxDepth + 1 }, () => []);
-    nodes.forEach((node) => columns[node.depth].push(node));
-    const maxRows = Math.max(1, ...columns.map((col) => col.length));
-    const width = Math.max(950, (maxDepth + 1) * 255), height = Math.max(285, maxRows * 104 + 68);
-    const coords = new Map(), gap = (width - 245) / maxDepth;
-    columns.forEach((column, depth) => column.forEach((node, i) => coords.set(node.id, { host: node.id, x: 123 + depth * gap, y: column.length === 1 ? height / 2 : 83 + i * ((height - 150) / (column.length - 1)), role: node.id === "local" ? "relay" : Array.from(edges.values()).some((e) => e.from === node.id) ? "gateway" : "SSH 设备" })));
-    const svg = makeSvgBase(width, height);
-    columns.forEach((col, depth) => { if (col.length) svg.append(svgEl("text", { x: 123 + depth * gap, y: 24, class: "graph-column-label", "text-anchor": "middle" }, depth === 0 ? "LOCAL WORKSTATION" : depth === maxDepth ? "REMOTE DEVICES" : `SSH HOP ${String(depth).padStart(2, "0")}`)); });
+    const layout = sshGraphLayout(all, graphViewportWidth());
+    const { nodes, edges, columns, coords, maxDepth, width } = layout;
+    const svg = makeSvgBase(layout);
+    columns.forEach((col, depth) => { if (col.length) svg.append(svgEl("text", { x: coords.get(col[0].id).x, y: 28, class: "graph-column-label", "text-anchor": "middle" }, depth === 0 ? "LOCAL WORKSTATION" : depth === maxDepth ? "REMOTE DEVICES" : `SSH HOP ${String(depth).padStart(2, "0")}`)); });
     for (const edge of edges.values()) {
       const from = coords.get(edge.from), to = coords.get(edge.to); if (!from || !to) continue;
-      const start = from.x + 91, end = to.x - 99, middle = (start + end) / 2;
+      const start = from.x + GRAPH.nodeWidth / 2, end = to.x - GRAPH.nodeWidth / 2 - 7, middle = (start + end) / 2;
       svg.append(svgEl("path", { class: "graph-edge", d: `M${start} ${from.y}C${middle} ${from.y},${middle} ${to.y},${end} ${to.y}`, "marker-end": "url(#arrow-ssh)" }));
       if (Math.abs(from.y - to.y) < 15) svg.append(svgEl("text", { x: middle, y: from.y - 11, class: "graph-edge-label", "text-anchor": "middle" }, `SSH :${hostById(edge.to)?.port || 22}`));
     }
     coords.forEach((node) => drawNode(svg, node));
-    if (nodes.size === 1) svg.append(svgEl("text", { x: width / 2 + 60, y: height / 2 + 4, class: "graph-edge-label", "text-anchor": "middle" }, "在 SSH 配置中添加设备，即可显示连接路径"));
+    if (nodes.size === 1) svg.append(svgEl("text", { x: width / 2, y: 238, class: "graph-edge-label", "text-anchor": "middle" }, "添加 SSH 设备后显示连接路径"));
     $("graphCaption").textContent = `已解析 ${all.filter((h) => h.id !== "local").length} 台远端设备。虚线表示 SSH 配置中的访问路径，并不代表设备当前在线；点击设备可测试连接。`;
+  }
+  function scheduleGraphLayout() {
+    if (graphResizeFrame) return;
+    graphResizeFrame = requestAnimationFrame(() => {
+      graphResizeFrame = 0;
+      if ($("graphViewport").getBoundingClientRect().width > 0) renderGraph();
+    });
+  }
+  function observeGraphViewport() {
+    const viewport = $("graphViewport");
+    if (typeof ResizeObserver === "function") {
+      const observer = new ResizeObserver(() => {
+        const width = Math.round(viewport.getBoundingClientRect().width);
+        if (width > 0 && width !== graphObservedWidth) { graphObservedWidth = width; scheduleGraphLayout(); }
+      });
+      observer.observe(viewport);
+    } else window.addEventListener("resize", scheduleGraphLayout);
   }
 
   function populateHostSelect(select, value) {
@@ -636,7 +729,8 @@
     $("statusFilter").addEventListener("change", renderMappings);
     $("refreshHostsButton").addEventListener("click", refreshHosts);
     $("logFilter").addEventListener("change", renderActivity);
-    $("fitGraphButton").addEventListener("click", () => { $("graphViewport").scrollTo({ left: 0, top: 0, behavior: "smooth" }); state.graphSignature = ""; renderGraph(); });
+    $("fitGraphButton").addEventListener("click", () => { state.graphSignature = ""; renderGraph(); $("graphViewport").scrollTo({ left: 0, top: 0, behavior: "smooth" }); });
+    observeGraphViewport();
     $("confirmOkButton").addEventListener("click", () => resolveConfirm(true));
     $("confirmCancelButton").addEventListener("click", () => resolveConfirm(false));
     $("confirmCloseButton").addEventListener("click", () => resolveConfirm(false));

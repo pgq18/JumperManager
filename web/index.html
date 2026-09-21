@@ -26,7 +26,7 @@
       </nav>
       <div class="sidebar-note"><span class="tiny-label">HOW IT WORKS</span><div class="mini-flow"><span data-icon="server"></span><i></i><span class="mini-local" data-icon="laptop"></span><i></i><span data-icon="server"></span></div><strong>让本机成为连接的桥梁</strong><p>使用已有 SSH 配置识别跳板路径，按需启动端口映射。</p></div>
       <div class="sidebar-bottom">
-        <div class="service-state"><span class="status-dot" id="serviceDot"></span><span id="serviceText">正在连接服务</span><span class="version">v1.1.1</span></div>
+        <div class="service-state"><span class="status-dot" id="serviceDot"></span><span id="serviceText">正在连接服务</span><span class="version">v1.1.2</span></div>
         <div class="local-endpoint"><span id="serviceEndpoint">127.0.0.1:8765</span><span>仅本机访问</span></div>
         <button type="button" id="shutdownButton" class="quiet-button"><span data-icon="power"></span>关闭程序</button>
       </div>
@@ -47,7 +47,7 @@
 
         <section class="panel topology-panel" aria-labelledby="topologyTitle">
           <div class="panel-heading"><div class="section-title"><span class="section-icon" data-icon="topology"></span><h2 id="topologyTitle">连接拓扑</h2><span class="subtle-tag" id="graphTag">SSH 路由</span></div><div class="segmented-control" aria-label="拓扑视图"><button type="button" data-graph="mapping" aria-pressed="false">映射链路</button><button type="button" class="active" data-graph="ssh" aria-pressed="true">SSH 路由</button></div></div>
-          <div class="graph-toolbar"><div class="graph-legend"><span><i class="legend-line ssh-line"></i>SSH 连接</span><span><i class="legend-line flow-line"></i>端口数据流</span><span><i class="legend-node"></i>本机中转</span></div><button type="button" id="fitGraphButton" class="text-button"><span data-icon="maximize"></span>适应视图</button></div>
+          <div class="graph-toolbar"><div class="graph-legend"><span><i class="legend-line ssh-line"></i>SSH 连接</span><span><i class="legend-line flow-line"></i>端口数据流</span><span><i class="legend-node"></i>本机中转</span></div><button type="button" id="fitGraphButton" class="text-button" title="保持文字清晰，超出区域可滚动"><span data-icon="maximize"></span>适应宽度</button></div>
           <div class="graph-viewport" id="graphViewport"><svg id="topologySvg" role="img" aria-label="设备之间的 SSH 连接和端口映射关系" xmlns="http://www.w3.org/2000/svg"></svg><div class="graph-empty" id="graphEmpty" hidden><span data-icon="route"></span><strong>从第一条映射开始</strong><p>选择两个设备与端口，程序会规划经本机中转的路径。</p><button type="button" class="button secondary" id="graphNewButton">新建映射<span data-icon="arrowRight"></span></button></div></div>
           <div class="graph-caption"><span data-icon="info"></span><span id="graphCaption">正在读取 SSH 路由…</span><span class="graph-caption-end">LOCAL RELAY</span></div>
         </section>
