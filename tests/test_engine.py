@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 
 from support import temp_directory
 from jumper_manager.engine import Manager, address, forward_spec, port
+from jumper_manager.connections import local_connections
 from jumper_manager.processes import terminate_owned
 from jumper_manager.ssh_config import discover_aliases, parse_effective_config, route_for, simple_proxy
 
@@ -91,9 +92,14 @@ class EngineTests(unittest.TestCase):
         self.refresh = patch.object(Manager, "refresh_hosts", fake_refresh)
         self.refresh.start()
         self.manager = Manager(self.root, str(self.root / "config"))
+        # These lifecycle tests never launch diagnostics on real SSH aliases.
+        self.snapshot = patch.object(self.manager, "_connection_snapshot", side_effect=lambda host, address, port:
+                                     local_connections(address, port) if host == "local" else set())
+        self.snapshot.start()
 
     def tearDown(self):
         self.manager.close()
+        self.snapshot.stop()
         self.refresh.stop()
         self.directory.__exit__(None, None, None)
 
@@ -166,7 +172,7 @@ class EngineTests(unittest.TestCase):
         self.manager._processes[mapping["id"]] = [{"process": process, "alias": "server-a", "log": self.root / "absent", "offset": 0}]
         with patch.object(self.manager, "_endpoint_check", side_effect=[{"ok": False, "message": "refused"}, {"ok": True}]):
             result = self.manager.check(mapping["id"])
-        self.assertEqual(result["status"], "degraded")
+        self.assertEqual(result["status"], "running")
         self.assertFalse(result["health"]["ok"])
         self.assertTrue(result["health"]["tunnel_ok"])
         self.assertFalse(result["health"]["target_ok"])
@@ -188,12 +194,13 @@ class EngineTests(unittest.TestCase):
         thread = None
         try:
             result = self.manager.start(mapping["id"])
-            self.assertEqual(result["status"], "degraded")
+            self.assertEqual(result["status"], "running")
             self.assertTrue(result["health"]["tunnel_ok"])
             self.assertFalse(result["health"]["target_ok"])
             self.assertFalse(result["health"]["ok"])
             self.assertIsNone(result["error"])
-            self.assertIn("无需重启隧道", result["health"]["summary"])
+            self.assertIn("运行正常", result["health"]["summary"])
+            self.assertNotIn("等待", result["health"]["summary"])
             relay = self.manager._relays[mapping["id"]]
             self.assertFalse(relay.closed.is_set())
 
@@ -267,7 +274,7 @@ class EngineTests(unittest.TestCase):
              patch("jumper_manager.engine.terminate_owned", return_value=True) as terminate:
             try:
                 result = self.manager.start(mapping["id"])
-                self.assertEqual(result["status"], "degraded")
+                self.assertEqual(result["status"], "running")
                 self.assertTrue(result["health"]["tunnel_ok"])
                 self.assertFalse(result["health"]["target_ok"])
                 self.assertIsNone(result["error"])
@@ -276,19 +283,19 @@ class EngineTests(unittest.TestCase):
                 for reachable in (True, False, True):
                     target_state["ready"] = reachable
                     checked = self.manager.check(mapping["id"])
-                    self.assertEqual(checked["status"], "running" if reachable else "degraded")
+                    self.assertEqual(checked["status"], "running")
                     self.assertTrue(checked["health"]["tunnel_ok"])
                     self.assertEqual(checked["health"]["target_ok"], reachable)
                     self.assertIsNone(checked["error"])
                     self.assertEqual(self.manager._processes[mapping["id"]], entries)
                 target_state["failure"] = OSError("Could not launch the diagnostic SSH process")
                 checked = self.manager.check(mapping["id"])
-                self.assertEqual(checked["status"], "degraded")
+                self.assertEqual(checked["status"], "running")
                 self.assertTrue(checked["health"]["tunnel_ok"])
                 self.assertIsNone(checked["health"]["target_ok"])
                 self.assertFalse(checked["health"]["ok"])
                 self.assertIn("无法确认", checked["health"]["summary"])
-                self.assertIn("diagnostic SSH", checked["error"])
+                self.assertIsNone(checked["error"])
                 self.assertIn("diagnostic SSH", " ".join(checked["health"]["details"]))
                 self.assertEqual(spawned.call_count, 2)
                 terminate.assert_not_called()

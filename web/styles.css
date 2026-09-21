@@ -961,7 +961,7 @@ h1 {
   stroke-dasharray: 5 4;
 }
 
-.graph-edge.mapping.running {
+.graph-edge.mapping.in-use {
   stroke-dasharray: 8 5;
   animation: flow 1.5s linear infinite;
 }
@@ -1056,6 +1056,7 @@ h1 {
 }
 
 .mapping-row {
+  position: relative;
   padding: 22px 24px 20px;
   border-bottom: 1px solid var(--line-soft);
   border-left: 2px solid transparent;
@@ -1165,7 +1166,7 @@ h1 {
   background: #f08c8d0b;
 }
 
-.status-badge.starting,.status-badge.stopping,.status-badge.waiting {
+.status-badge.starting,.status-badge.stopping {
   color: var(--warning);
   background: #eab96d0a;
   border-color: #eab96d25;
@@ -1264,7 +1265,7 @@ h1 {
   height: 17px;
 }
 
-.mapping-error,.mapping-waiting {
+.mapping-error {
   color: var(--danger);
   font-size: 14px;
   padding: 12px 14px;
@@ -1275,9 +1276,176 @@ h1 {
   overflow-wrap: anywhere;
 }
 
-.mapping-waiting {
-  color: var(--warning);
-  background: #eab96d09;
+.mapping-order-hint {
+  padding: 11px 24px;
+  border-bottom: 1px solid var(--line-soft);
+  color: var(--dim);
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.mapping-row.dragging {
+  opacity: .45;
+}
+
+.mapping-row.drop-before:before,.mapping-row.drop-after:after {
+  content: "";
+  position: absolute;
+  left: 14px;
+  right: 14px;
+  height: 2px;
+  background: var(--accent);
+  box-shadow: 0 0 8px #36d4b755;
+  z-index: 1;
+}
+
+.mapping-row.drop-before:before {
+  top: 0;
+}
+
+.mapping-row.drop-after:after {
+  bottom: 0;
+}
+
+.mapping-row.drop-blocked {
+  background: #8191a711;
+}
+
+.mapping-drag-handle {
+  padding: 0;
+  cursor: grab;
+  touch-action: pan-y;
+}
+
+.mapping-drag-handle:active {
+  cursor: grabbing;
+}
+
+.mapping-drag-handle .icon {
+  stroke-width: 3;
+}
+
+.pinned-mark {
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.pinned-mark .icon {
+  width: 15px;
+  height: 15px;
+}
+
+.mapping-snapshot {
+  display: flex;
+  align-items: center;
+  gap: 10px 16px;
+  flex-wrap: wrap;
+  margin: -3px 0 13px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.usage-badge {
+  color: var(--muted);
+  background: #8191a70a;
+  border: 1px solid #8191a71c;
+  border-radius: 5px;
+  padding: 4px 7px;
+}
+
+.usage-badge.in-use,.usage-summary.in-use {
+  color: var(--accent);
+}
+
+.usage-badge.in-use {
+  background: #36d4b70a;
+  border-color: #36d4b722;
+}
+
+.target-status {
+  color: var(--dim);
+}
+
+.mapping-row-tools {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  width: 100%;
+}
+
+.mapping-order-controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.mapping-order-controls .icon-button {
+  width: 34px;
+  height: 36px;
+  padding: 8px;
+}
+
+.mapping-order-controls .icon-button .icon {
+  width: 16px;
+  height: 16px;
+}
+
+.mapping-order-controls .is-pinned {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-color: #36d4b722;
+}
+
+.usage-details {
+  background: #8191a707;
+  border: 1px solid var(--line-soft);
+  border-radius: 7px;
+  padding: 14px;
+  margin-top: 18px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.usage-details .detail-section-label {
+  margin: 0 0 8px;
+}
+
+.usage-summary {
+  display: block;
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.usage-details p {
+  margin-top: 7px;
+  overflow-wrap: anywhere;
+}
+
+.usage-details small {
+  display: block;
+  font-size: 12px;
+  color: var(--dim);
+  margin-top: 9px;
+  line-height: 1.7;
+}
+
+.usage-timestamp {
+  color: var(--dim);
+  font-size: 12px;
+}
+
+.health-diagnostics {
+  margin-top: 10px;
+  color: var(--muted);
+}
+
+.health-diagnostics summary {
+  cursor: pointer;
+  font-size: 12px;
 }
 
 .empty-state {
@@ -1466,13 +1634,13 @@ h1 {
   color: var(--danger);
 }
 
-.health-box.waiting {
-  background: #eab96d08;
-  border-color: #eab96d25;
+.health-box.neutral {
+  background: #8191a708;
+  border-color: var(--line);
 }
 
-.health-box.waiting .health-title {
-  color: var(--warning);
+.health-box.neutral .health-title {
+  color: var(--muted);
 }
 
 .health-check-row {
@@ -1490,10 +1658,6 @@ h1 {
 
 .health-check-row.ready strong {
   color: var(--accent);
-}
-
-.health-check-row.pending strong {
-  color: var(--warning);
 }
 
 .health-check-row.failed strong {

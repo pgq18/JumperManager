@@ -63,6 +63,14 @@ class FakeManager:
         self._record("check", mapping_id)
         return {**self.mapping, "id": mapping_id, "health": {"ok": True}}
 
+    def reorder(self, mapping_ids):
+        self._record("reorder", mapping_ids)
+        return [{**self.mapping, "id": mapping_id} for mapping_id in mapping_ids]
+
+    def pin(self, mapping_id, pinned):
+        self._record("pin", mapping_id, pinned)
+        return {**self.mapping, "id": mapping_id, "pinned": pinned}
+
 
 class ServerTests(unittest.TestCase):
     def setUp(self):
@@ -127,6 +135,8 @@ class ServerTests(unittest.TestCase):
             ("POST", "/api/mappings/example/start", {}, "start", ("example",), 200),
             ("POST", "/api/mappings/example/stop", {}, "stop", ("example",), 200),
             ("POST", "/api/mappings/example/check", {}, "check", ("example",), 200),
+            ("POST", "/api/mappings/reorder", {"mapping_ids": ["example"]}, "reorder", (["example"],), 200),
+            ("POST", "/api/mappings/example/pin", {"pinned": True}, "pin", ("example", True), 200),
             ("DELETE", "/api/mappings/example", None, "delete", ("example",), 200),
         ]
         for method, path, body, called_method, args, expected_status in cases:
@@ -161,7 +171,7 @@ class ServerTests(unittest.TestCase):
                 self.assertEqual(status, 200)
 
     def test_mutations_require_token(self):
-        for method, path in [("POST", "/api/mappings"), ("PUT", "/api/mappings/example"), ("DELETE", "/api/mappings/example"), ("POST", "/api/shutdown")]:
+        for method, path in [("POST", "/api/mappings"), ("PUT", "/api/mappings/example"), ("DELETE", "/api/mappings/example"), ("POST", "/api/mappings/reorder"), ("POST", "/api/mappings/example/pin"), ("POST", "/api/shutdown")]:
             for token in ("", "incorrect"):
                 with self.subTest(method=method, path=path, token=token):
                     status, _, _ = self.request(method, path, {}, token=False, headers={"X-Jumper-Token": token})
@@ -196,6 +206,81 @@ class ServerTests(unittest.TestCase):
         status, _, _ = self.request("POST", "/api/preview")
         self.assertEqual(status, 200)
         self.assertEqual(self.manager.calls[-1], ("preview", ({},)))
+
+    def test_reorder_response_preserves_requested_order_and_accepts_empty_list(self):
+        for mapping_ids in (["second", "example", "third"], []):
+            with self.subTest(mapping_ids=mapping_ids):
+                status, _, data = self.request("POST", "/api/mappings/reorder", {"mapping_ids": mapping_ids})
+                self.assertEqual(status, 200, data)
+                self.assertEqual(list(data), ["mappings"])
+                self.assertEqual([mapping["id"] for mapping in data["mappings"]], mapping_ids)
+                self.assertEqual(self.manager.calls[-1], ("reorder", (mapping_ids,)))
+
+    def test_pin_accepts_both_boolean_values(self):
+        for pinned in (True, False):
+            with self.subTest(pinned=pinned):
+                status, _, data = self.request("POST", "/api/mappings/example/pin", {"pinned": pinned})
+                self.assertEqual(status, 200, data)
+                self.assertEqual(data["id"], "example")
+                self.assertIs(data["pinned"], pinned)
+                self.assertEqual(self.manager.calls[-1], ("pin", ("example", pinned)))
+
+    def test_ordering_payload_validation_prevents_manager_calls(self):
+        cases = [
+            ("/api/mappings/reorder", None),
+            ("/api/mappings/reorder", {}),
+            *[("/api/mappings/reorder", {"mapping_ids": value})
+              for value in (None, "example", True, 1, {}, [None], [1], [True], [""], [["example"]])],
+            ("/api/mappings/example/pin", None),
+            ("/api/mappings/example/pin", {}),
+            *[("/api/mappings/example/pin", {"pinned": value})
+              for value in (None, 0, 1, "false", "true", [], {})],
+        ]
+        for path, body in cases:
+            with self.subTest(path=path, body=body):
+                status, _, data = self.request("POST", path, body)
+                self.assertEqual(status, 400, data)
+        self.assertEqual(self.manager.calls, [])
+
+    def test_ordering_routes_reject_other_methods_without_mutating_mapping_named_reorder(self):
+        for path in ("/api/mappings/reorder", "/api/mappings/example/pin"):
+            for method in ("GET", "PUT", "DELETE"):
+                with self.subTest(method=method, path=path):
+                    status, _, data = self.request(method, path, {} if method != "GET" else None)
+                    self.assertEqual(status, 404, data)
+        for path in ("/api/mappings/reorder/extra", "/api/mappings/example/pin/extra"):
+            status, _, data = self.request("POST", path, {"mapping_ids": ["example"], "pinned": True})
+            self.assertEqual(status, 404, data)
+        self.assertEqual(self.manager.calls, [])
+
+    def test_ordering_actions_keep_origin_and_shutdown_guards(self):
+        for path, body in (("/api/mappings/reorder", {"mapping_ids": ["example"]}),
+                           ("/api/mappings/example/pin", {"pinned": True})):
+            with self.subTest(path=path):
+                status, _, _ = self.request("POST", path, body, headers={"Origin": "https://evil.example"})
+                self.assertEqual(status, 403)
+                self.server.shutting_down = True
+                try:
+                    status, _, _ = self.request("POST", path, body)
+                    self.assertEqual(status, 503)
+                finally:
+                    self.server.shutting_down = False
+        self.assertEqual(self.manager.calls, [])
+
+    def test_ordering_manager_validation_and_storage_errors_are_preserved(self):
+        cases = [
+            ("reorder", "/api/mappings/reorder", {"mapping_ids": ["example"]}, ValueError("complete set required"), 400),
+            ("reorder", "/api/mappings/reorder", {"mapping_ids": ["example"]}, RuntimeError("mapping list changed"), 409),
+            ("pin", "/api/mappings/example/pin", {"pinned": True}, KeyError("missing"), 404),
+            ("pin", "/api/mappings/example/pin", {"pinned": False}, OSError("could not save"), 409),
+        ]
+        for method, path, body, error, expected in cases:
+            with self.subTest(method=method, error=error):
+                self.manager.failures[method] = error
+                status, _, data = self.request("POST", path, body)
+                self.assertEqual(status, expected, data)
+                self.assertIsInstance(data["error"], str)
+                self.manager.failures.clear()
 
     def test_manager_errors_have_documented_statuses(self):
         for error, expected in [(ValueError("invalid"), 400), (KeyError("missing"), 404), (RuntimeError("busy"), 409), (OSError("cannot bind"), 409), (TypeError("internal detail"), 500)]:

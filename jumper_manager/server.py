@@ -197,6 +197,14 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/mappings" and self.command == "POST":
                 result = manager.create(body)
                 code = 201
+            elif path == "/api/mappings/reorder":
+                if self.command != "POST":
+                    self._json(404, {"error": "接口不存在。"})
+                    return
+                mapping_ids = body.get("mapping_ids")
+                if not isinstance(mapping_ids, list) or any(not isinstance(item, str) or not item for item in mapping_ids):
+                    raise ValueError("mapping_ids 必须是包含全部映射 ID 的数组。")
+                result = {"mappings": manager.reorder(mapping_ids)}
             elif path == "/api/shutdown" and self.command == "POST":
                 self.server.shutting_down = True
                 self._json(200, {"ok": True})
@@ -213,6 +221,11 @@ class Handler(BaseHTTPRequestHandler):
                     result = {"ok": True}
                 elif self.command == "POST" and action in {"start", "stop", "check"}:
                     result = getattr(manager, action)(mapping_id)
+                elif self.command == "POST" and action == "pin":
+                    pinned = body.get("pinned")
+                    if not isinstance(pinned, bool):
+                        raise ValueError("pinned 必须是布尔值。")
+                    result = manager.pin(mapping_id, pinned)
                 else:
                     self._json(404, {"error": "接口不存在。"})
                     return

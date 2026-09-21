@@ -17,18 +17,20 @@ import threading
 import time
 import uuid
 
+from .connections import local_connections, peer_key, remote_snapshot_script
 from .processes import WindowsJob, hidden_options, identity, terminate_owned
 from .ssh_config import ALIAS_RE, discover_aliases, parse_effective_config, route_for, simple_proxy, configuration_signature
 
 VERSION = "1.0"
 CONNECT_TIMEOUT = 8
 CONFIG_POLL_INTERVAL = 2
+PROBE_EXCLUSION_SECONDS = 30
 SAFE_OPTIONS = ["BatchMode=yes", "PasswordAuthentication=no", "KbdInteractiveAuthentication=no",
                 "StrictHostKeyChecking=yes", "UpdateHostKeys=no", "ConnectionAttempts=1",
                 "ConnectTimeout=8", "ServerAliveInterval=15", "ServerAliveCountMax=3",
                 "ControlMaster=no", "ControlPath=none", "RequestTTY=no",
                 "ForkAfterAuthentication=no", "PermitLocalCommand=no", "RemoteCommand=none"]
-FIELDS = ("name", "source_host", "source_port", "target_host", "target_port", "bind_address", "target_address", "auto_start")
+FIELDS = ("name", "source_host", "source_port", "target_host", "target_port", "bind_address", "target_address", "auto_start", "pinned")
 
 
 def now() -> str:
@@ -83,6 +85,7 @@ def forward_spec(bind_address: str, source_port: int, target_address: str, targe
 
 def local_socket_check(operation: str, host: str, target_port: int) -> dict:
     try:
+        probe_peer = None
         if operation == "available":
             family = socket.AF_INET6 if ":" in host else socket.AF_INET
             with socket.socket(family) as sock:
@@ -93,9 +96,10 @@ def local_socket_check(operation: str, host: str, target_port: int) -> dict:
                 sock.bind((host, target_port))
                 sock.listen(1)
         else:
-            with socket.create_connection((host, target_port), timeout=4):
-                pass
-        return {"ok": True, "message": "端口可绑定" if operation == "available" else "TCP 连接成功"}
+            with socket.create_connection((host, target_port), timeout=4) as sock:
+                probe_peer = list(sock.getsockname()[:2])
+        return {"ok": True, "message": "端口可绑定" if operation == "available" else "TCP 连接成功",
+                "probe_peer": probe_peer}
     except OSError as exc:
         return {"ok": False, "message": str(exc), "errno": exc.errno}
 
@@ -189,6 +193,7 @@ class Manager:
         self._mappings: dict[str, dict] = {}
         self._processes: dict[str, list[dict]] = {}
         self._relays: dict[str, LocalRelay] = {}
+        self._probe_peers: dict[str, dict[tuple[str, int], float]] = {}
         self._hosts: list[dict] = []
         self._effective: dict[str, dict] = {}
         self._closed = threading.Event()
@@ -384,6 +389,10 @@ class Manager:
         if not isinstance(auto, bool):
             raise ValueError("auto_start 必须是布尔值。")
         result["auto_start"] = auto
+        pinned = payload.get("pinned", False)
+        if not isinstance(pinned, bool):
+            raise ValueError("pinned 必须是布尔值。")
+        result["pinned"] = pinned
         if result["source_host"] == result["target_host"] and result["source_port"] == result["target_port"] and result["bind_address"] == result["target_address"]:
             raise ValueError("监听端点和目标端点相同会形成回路，请修改设备、地址或端口。")
         return result
@@ -425,8 +434,8 @@ class Manager:
 
     def _new_mapping(self, value: dict, mapping_id: str) -> dict:
         plan = self.preview(value)
-        return {**value, "id": mapping_id, "status": "stopped", "route": plan["route"], "plan": plan, "error": None,
-                "health": None, "last_checked": None, "logs": []}
+        return {**value, "pinned": value.get("pinned", False), "id": mapping_id, "status": "stopped", "route": plan["route"], "plan": plan, "error": None,
+                "health": None, "usage": None, "last_checked": None, "logs": []}
 
     def _load(self):
         path = self.data / "mappings.json"
@@ -437,17 +446,23 @@ class Manager:
             if not isinstance(raw, dict) or not isinstance(raw.get("mappings"), list):
                 raise ValueError("格式不正确")
             for entry in raw["mappings"]:
+                if not isinstance(entry, dict):
+                    raise ValueError("映射配置必须是 JSON 对象。")
                 mapping_id = entry.get("id")
                 if not isinstance(mapping_id, str) or not re.fullmatch(r"[0-9a-f]{32}", mapping_id) or mapping_id in self._mappings:
                     raise ValueError("映射 ID 不正确或重复")
+                pinned = entry.get("pinned", False)
+                if not isinstance(pinned, bool):
+                    raise ValueError("pinned 必须是布尔值。")
                 try:
                     value = self._validate(entry)
                     mapping = self._new_mapping(value, mapping_id)
                 except ValueError as exc:
                     # Keep removed SSH aliases visible so a refresh/edit can fix them.
                     mapping = {key: entry.get(key) for key in FIELDS}
+                    mapping["pinned"] = pinned
                     mapping.update({"id": mapping_id, "status": "error", "route": [], "plan": {"route": [], "description": "配置需要修正", "warnings": [str(exc)], "steps": []},
-                                    "error": str(exc), "health": None, "last_checked": None, "logs": []})
+                                    "error": str(exc), "health": None, "usage": None, "last_checked": None, "logs": []})
                 self._mappings[mapping_id] = mapping
                 self._mapping_locks[mapping_id] = threading.RLock()
                 if self._recovery_warnings:
@@ -456,11 +471,13 @@ class Manager:
             raise RuntimeError(f"读取 {path} 失败；为防止覆盖旧配置已停止启动：{exc}") from exc
 
     def _save(self):
-        atomic_json(self.data / "mappings.json", {"version": VERSION, "mappings": [{key: value.get(key) for key in ("id", *FIELDS)} for value in self._mappings.values()]})
+        ordered = sorted(self._mappings.values(), key=lambda value: not value.get("pinned", False))
+        atomic_json(self.data / "mappings.json", {"version": VERSION, "mappings": [{key: value.get(key) for key in ("id", *FIELDS)} for value in ordered]})
 
     def state(self) -> dict:
         with self._lock:
-            return {"hosts": copy.deepcopy(self._hosts), "mappings": copy.deepcopy(list(self._mappings.values())), "ssh_config": str(self.config_path), "version": VERSION, "ssh_discovery": copy.deepcopy(self._discovery)}
+            ordered = sorted(self._mappings.values(), key=lambda value: not value.get("pinned", False))
+            return {"hosts": copy.deepcopy(self._hosts), "mappings": copy.deepcopy(ordered), "ssh_config": str(self.config_path), "version": VERSION, "ssh_discovery": copy.deepcopy(self._discovery)}
 
     def _get(self, mapping_id):
         with self._lock:
@@ -495,6 +512,9 @@ class Manager:
             if old["status"] not in {"stopped", "error"} or self._processes.get(mapping_id) or mapping_id in self._relays:
                 raise ValueError("请先停止映射再修改。")
             value = self._validate(payload)
+            # Editing connection settings must not reset list metadata omitted
+            # by the form. Pin changes have their own endpoint and ordering rule.
+            value["pinned"] = old.get("pinned", False)
             mapping = self._new_mapping(value, mapping_id)
             self._mappings[mapping_id] = mapping
             try:
@@ -505,16 +525,60 @@ class Manager:
             self._log(mapping_id, "info", "映射配置已更新。")
             return copy.deepcopy(mapping)
 
+    def pin(self, mapping_id, pinned):
+        if not isinstance(pinned, bool):
+            raise ValueError("pinned 必须是布尔值。")
+        with self._lock:
+            if self._closed.is_set():
+                raise RuntimeError("程序正在关闭。")
+            mapping = self._get(mapping_id)
+            previous = self._mappings
+            previous_pinned = mapping.get("pinned", False)
+            remaining = [value for key, value in previous.items() if key != mapping_id]
+            pinned_group = [value for value in remaining if value.get("pinned", False)]
+            normal_group = [value for value in remaining if not value.get("pinned", False)]
+            mapping["pinned"] = pinned
+            ordered = [mapping, *pinned_group, *normal_group] if pinned else [*pinned_group, mapping, *normal_group]
+            self._mappings = {value["id"]: value for value in ordered}
+            try:
+                self._save()
+            except Exception:
+                mapping["pinned"] = previous_pinned
+                self._mappings = previous
+                raise
+            return copy.deepcopy(mapping)
+
+    def reorder(self, mapping_ids):
+        if not isinstance(mapping_ids, list) or any(not isinstance(value, str) or not value for value in mapping_ids):
+            raise ValueError("mapping_ids 必须是包含全部映射 ID 的数组。")
+        if len(set(mapping_ids)) != len(mapping_ids):
+            raise ValueError("排序列表不能包含重复的映射 ID。")
+        with self._lock:
+            if self._closed.is_set():
+                raise RuntimeError("程序正在关闭。")
+            if len(mapping_ids) != len(self._mappings) or set(mapping_ids) != set(self._mappings):
+                raise RuntimeError("映射列表已变化，请刷新后使用完整列表重新排序。")
+            previous = self._mappings
+            ordered = sorted(mapping_ids, key=lambda mapping_id: not previous[mapping_id].get("pinned", False))
+            self._mappings = {mapping_id: previous[mapping_id] for mapping_id in ordered}
+            try:
+                self._save()
+            except Exception:
+                self._mappings = previous
+                raise
+            return copy.deepcopy(list(self._mappings.values()))
+
     def delete(self, mapping_id):
         self._get(mapping_id)
         with self._mapping_locks[mapping_id]:
             self.stop(mapping_id)
             with self._lock:
-                old = self._mappings.pop(mapping_id)
+                previous = self._mappings.copy()
+                self._mappings.pop(mapping_id)
                 try:
                     self._save()
                 except Exception:
-                    self._mappings[mapping_id] = old
+                    self._mappings = previous
                     raise
 
     def _log(self, mapping_id, level, message):
@@ -581,6 +645,7 @@ class Manager:
         # OpenSSH checks again when acquiring the actual listener after probing.
         # Never use SO_REUSEPORT or Windows SO_REUSEADDR to bypass conflicts.
         script += """try:
+ probe_peer=None
  if p['operation']=='available':
   with socket.socket(socket.AF_INET6 if ':' in p['address'] else socket.AF_INET) as s:
    if os.name=='nt' and hasattr(socket,'SO_EXCLUSIVEADDRUSE'):
@@ -590,9 +655,9 @@ class Manager:
    s.bind((p['address'],p['port']))
    s.listen(1)
  else:
-  with socket.create_connection((p['address'],p['port']),4):
-   pass
- print('JM_RESULT:'+json.dumps({'ok':True,'message':'TCP check passed'}))
+  with socket.create_connection((p['address'],p['port']),4) as s:
+   probe_peer=list(s.getsockname()[:2])
+ print('JM_RESULT:'+json.dumps({'ok':True,'message':'TCP check passed','probe_peer':probe_peer}))
 except OSError as e:
  print('JM_RESULT:'+json.dumps({'ok':False,'message':str(e),'errno':e.errno}))
 """
@@ -607,6 +672,58 @@ except OSError as e:
             return {"ok": False, "checked": False, "message": self._diagnostic(result.stderr or result.stdout)}
         except (OSError, RuntimeError, ValueError) as exc:
             return {"ok": False, "checked": False, "message": str(exc)}
+
+    def _remember_probe(self, mapping_id, result):
+        # The client ephemeral endpoint identifies only this app's own source
+        # listener check. Do not retain process metadata or expose peers in API.
+        value = result.get("probe_peer")
+        if isinstance(value, (list, tuple)) and len(value) == 2:
+            try:
+                current = time.monotonic()
+                recent = {peer: expiry for peer, expiry in self._probe_peers.get(mapping_id, {}).items()
+                          if expiry > current}
+                recent[peer_key(*value)] = current + PROBE_EXCLUSION_SECONDS
+                self._probe_peers[mapping_id] = recent
+            except (ValueError, TypeError):
+                pass
+
+    def _connection_snapshot(self, host, host_address, host_port):
+        if host == "local":
+            return local_connections(host_address, host_port)
+        result = self._run([*self._ssh_args(host, probe=True), host, "python3 -"],
+                           input=remote_snapshot_script(host_address, host_port), timeout=25)
+        if result.returncode:
+            raise RuntimeError(self._diagnostic(result.stderr or result.stdout))
+        for line in reversed(result.stdout.splitlines()):
+            if line.startswith("JM_CONNECTIONS:"):
+                data = json.loads(line.removeprefix("JM_CONNECTIONS:"))
+                if not isinstance(data, dict) or data.get("ok") is not True:
+                    raise RuntimeError(data.get("message", "远端连接采样失败。") if isinstance(data, dict) else "远端连接采样返回无效结果。")
+                peers = data.get("peers")
+                if not isinstance(peers, list) or any(not isinstance(item, list) or len(item) != 2
+                                                      or isinstance(item[1], bool) or not isinstance(item[1], int)
+                                                      or not 1 <= item[1] <= 65535 for item in peers):
+                    raise ValueError("远端连接采样返回无效结果。")
+                return {peer_key(*item) for item in peers}
+        raise RuntimeError(self._diagnostic(result.stderr or result.stdout))
+
+    def _sample_usage(self, mapping_id, mapping):
+        checked_at = now()
+        try:
+            peers = self._connection_snapshot(mapping["source_host"], mapping["bind_address"], mapping["source_port"])
+            current = time.monotonic()
+            excluded = {peer: expiry for peer, expiry in self._probe_peers.get(mapping_id, {}).items()
+                        if expiry > current and peer in peers}
+            count = len(peers - excluded.keys())
+            # Absence and a bounded lifetime both remove exclusions. Without
+            # the deadline, a port reused between two checks could hide a real
+            # client indefinitely despite the diagnostic having closed hours ago.
+            self._probe_peers[mapping_id] = excluded
+            return {"active_connections": count, "in_use": count > 0, "checked_at": checked_at,
+                    "message": f"入口当前有 {count} 个 ESTABLISHED 客户端 TCP 连接；已排除本映射的健康检查连接。瞬时快照不代表进程数量或正在传输数据。"}
+        except (OSError, RuntimeError, ValueError, TypeError) as exc:
+            return {"active_connections": None, "in_use": None, "checked_at": checked_at,
+                    "message": "无法获取入口连接快照：" + str(exc)}
 
     def _spawn(self, mapping_id, alias, kind, specification):
         if self._closed.is_set():
@@ -673,9 +790,15 @@ except OSError as e:
                         return
                 except OSError:
                     pass
-            elif local_socket_check("connect", listener_address, listener_port)["ok"]:
-                self._read_process_log(mapping_id, entry)
-                return
+            else:
+                result = local_socket_check("connect", listener_address, listener_port)
+                mapping = self._get(mapping_id)
+                if (mapping["source_host"] == "local" and listener_address == mapping["bind_address"]
+                        and listener_port == mapping["source_port"]):
+                    self._remember_probe(mapping_id, result)
+                if result["ok"]:
+                    self._read_process_log(mapping_id, entry)
+                    return
             time.sleep(0.15)
         raise RuntimeError("SSH 未在 25 秒内确认端口转发成功，请查看日志。")
 
@@ -690,7 +813,8 @@ except OSError as e:
                     return copy.deepcopy(mapping)
                 value = self._validate(mapping)
                 plan = self.preview(value)
-                mapping.update(status="starting", error=None, health=None, plan=plan, route=plan["route"], config_changed=False, config_error=False)
+                mapping.update(status="starting", error=None, health=None, usage=None, plan=plan, route=plan["route"], config_changed=False, config_error=False)
+            self._probe_peers.pop(mapping_id, None)
             self._log(mapping_id, "info", "开始检查监听端口并建立隧道；目标服务可以稍后启动。")
             try:
                 available = self._endpoint_check(value["source_host"], "available", value["bind_address"], value["source_port"])
@@ -790,7 +914,8 @@ except OSError as e:
                     mapping.update(status="error", error=str(exc))
                 raise
             with self._lock:
-                mapping.update(status="stopped", error=None, health=None)
+                mapping.update(status="stopped", error=None, health=None, usage=None)
+                self._probe_peers.pop(mapping_id, None)
             self._log(mapping_id, "info", "已停止此映射的监听与转发。")
             return copy.deepcopy(mapping)
 
@@ -804,9 +929,16 @@ except OSError as e:
                 message = "SSH 配置已变化，现有隧道未改道；请停止并重新启动后再检查新路径。"
                 with self._lock:
                     mapping.update(status="degraded", error=message, last_checked=now(),
+                                   usage={"active_connections": None, "in_use": None, "checked_at": now(),
+                                          "message": "SSH 配置已变化，未对可能不同的入口采样。"},
                                    health={"ok": False, "tunnel_ok": None, "target_ok": None,
                                            "summary": message, "details": [message], "checked_at": now()})
                 return copy.deepcopy(mapping)
+            # Sample before any target/listener probes. Previous startup and
+            # health probes are excluded by their actual client endpoints.
+            usage = self._sample_usage(mapping_id, mapping)
+            with self._lock:
+                mapping["usage"] = usage
             details = []
             tunnel_ok = True
             entries = self._processes.get(mapping_id, [])
@@ -828,6 +960,7 @@ except OSError as e:
             target_ok = bool(target["ok"]) if target.get("checked", True) else None
             details.append("目标端口：" + ("TCP 可达。" if target_ok else target["message"]))
             listener = probe(mapping["source_host"], mapping["bind_address"], mapping["source_port"])
+            self._remember_probe(mapping_id, listener)
             details.append("来源监听：" + ("TCP 可连接。" if listener["ok"] else listener["message"]))
             tunnel_ok = tunnel_ok and bool(listener["ok"])
             if mapping.get("relay_port"):
@@ -840,17 +973,17 @@ except OSError as e:
             if ok:
                 summary = "SSH/监听与目标 TCP 检查通过；应用协议未验证。"
             elif tunnel_ok and target_ok is False:
-                summary = "隧道已建立，目标服务尚未就绪；服务启动后即可使用，无需重启隧道。"
+                summary = "隧道运行正常；目标 TCP 当前不可达，不影响隧道保持运行。"
             elif tunnel_ok:
-                summary = "隧道已建立，但无法确认目标服务状态；请查看检查详情，可稍后再次检查。"
+                summary = "隧道运行正常；本次无法确认目标 TCP 状态，请查看检查详情。"
             else:
                 summary = "隧道检查存在异常，请检查详细信息及日志。"
             health = {"ok": ok, "tunnel_ok": tunnel_ok, "target_ok": target_ok,
                       "summary": summary, "details": details, "checked_at": checked_at}
             with self._lock:
-                mapping.update(health=health, last_checked=checked_at, status="running" if ok else "degraded",
-                               error=None if tunnel_ok and target_ok is not None else "；".join(details[:-1]))
-            self._log(mapping_id, "info" if ok else "warning", health["summary"])
+                mapping.update(health=health, last_checked=checked_at, status="running" if tunnel_ok else "degraded",
+                               error=None if tunnel_ok else "；".join(details[:-1]))
+            self._log(mapping_id, "info" if tunnel_ok else "warning", health["summary"])
             return copy.deepcopy(mapping)
 
     def _monitor(self):
@@ -876,7 +1009,7 @@ except OSError as e:
                         message = "SSH 连接已断开：" + ", ".join(entry["alias"] for entry in failed) + "。已停止相关转发，可手动重新启动。"
                         self._cleanup(mapping_id)
                         with self._lock:
-                            mapping.update(status="error", error=message,
+                            mapping.update(status="error", error=message, usage=None,
                                            health={"ok": False, "tunnel_ok": False, "target_ok": None,
                                                    "summary": message, "details": [message], "checked_at": now()})
                         self._log(mapping_id, "error", message)

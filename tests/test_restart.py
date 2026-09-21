@@ -44,6 +44,9 @@ class ReuseAwareSocket:
         if self.scenario == "occupied_listen":
             raise OSError(errno.EADDRINUSE, "Address already in use")
 
+    def getsockname(self):
+        return ('127.0.0.1', 43123)
+
     def close(self):
         self.events.append(("close",))
         self.closed = True

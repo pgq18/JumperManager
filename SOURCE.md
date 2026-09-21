@@ -1,12 +1,12 @@
 # Corresponding source
 
-JumperManager v1.1.3 is licensed under **AGPL-3.0-only**. The matching
-application source is the `v1.1.3` tag at:
+JumperManager v1.1.4 is licensed under **AGPL-3.0-only**. The matching
+application source is the `v1.1.4` tag at:
 
-https://github.com/pgq18/JumperManager/tree/v1.1.3
+https://github.com/pgq18/JumperManager/tree/v1.1.4
 
 The same release page as the Windows executable provides
-**JumperManager-Source-v1.1.3.zip** at no charge. This archive includes the
+**JumperManager-Source-v1.1.4.zip** at no charge. This archive includes the
 application source, build scripts, pinned package requirements, license
 notices, and the matching pystray 0.19.5 and PyInstaller 6.22.3 source archives
 under `third-party-source/`. Original upstream sources are identified in
