@@ -18,6 +18,7 @@ import time
 import uuid
 
 from .connections import local_connections, peer_key, remote_snapshot_script
+from .target_processes import local_target_processes, remote_target_process_script
 from .processes import WindowsJob, hidden_options, identity, terminate_owned
 from .ssh_config import ALIAS_RE, discover_aliases, parse_effective_config, route_for, simple_proxy, configuration_signature
 
@@ -435,7 +436,7 @@ class Manager:
     def _new_mapping(self, value: dict, mapping_id: str) -> dict:
         plan = self.preview(value)
         return {**value, "pinned": value.get("pinned", False), "id": mapping_id, "status": "stopped", "route": plan["route"], "plan": plan, "error": None,
-                "health": None, "usage": None, "last_checked": None, "logs": []}
+                "health": None, "usage": None, "target_usage": None, "last_checked": None, "logs": []}
 
     def _load(self):
         path = self.data / "mappings.json"
@@ -462,7 +463,7 @@ class Manager:
                     mapping = {key: entry.get(key) for key in FIELDS}
                     mapping["pinned"] = pinned
                     mapping.update({"id": mapping_id, "status": "error", "route": [], "plan": {"route": [], "description": "配置需要修正", "warnings": [str(exc)], "steps": []},
-                                    "error": str(exc), "health": None, "usage": None, "last_checked": None, "logs": []})
+                                    "error": str(exc), "health": None, "usage": None, "target_usage": None, "last_checked": None, "logs": []})
                 self._mappings[mapping_id] = mapping
                 self._mapping_locks[mapping_id] = threading.RLock()
                 if self._recovery_warnings:
@@ -725,6 +726,40 @@ except OSError as e:
             return {"active_connections": None, "in_use": None, "checked_at": checked_at,
                     "message": "无法获取入口连接快照：" + str(exc)}
 
+    def _target_process_snapshot(self, host, host_address, host_port):
+        if host == "local":
+            return local_target_processes(host_address, host_port)
+        result = self._run([*self._ssh_args(host, probe=True), host, "python3 -"],
+                           input=remote_target_process_script(host_address, host_port), timeout=25)
+        if result.returncode:
+            raise RuntimeError(self._diagnostic(result.stderr or result.stdout))
+        for line in reversed(result.stdout.splitlines()):
+            if line.startswith("JM_TARGET_PROCESSES:"):
+                return json.loads(line.removeprefix("JM_TARGET_PROCESSES:"))
+        raise RuntimeError(self._diagnostic(result.stderr or result.stdout))
+
+    def _sample_target_usage(self, mapping):
+        checked_at = now()
+        try:
+            value = self._target_process_snapshot(mapping["target_host"], mapping["target_address"], mapping["target_port"])
+            if not isinstance(value, dict):
+                raise ValueError("目标进程检查返回无效结果。")
+            count, listening, complete = value.get("process_count"), value.get("listening"), value.get("complete")
+            if (not isinstance(complete, bool) or (listening is not None and not isinstance(listening, bool))
+                    or (count is not None and (isinstance(count, bool) or not isinstance(count, int) or count < 0))):
+                raise ValueError("目标进程检查返回无效结果。")
+            if not complete:
+                count = None
+            elif count is None or (count == 0 and listening is not False) or (count > 0 and listening is not True):
+                raise ValueError("目标进程检查返回不一致的结果。")
+            return {"process_count": count, "listening": listening, "complete": complete,
+                    "message": str(value.get("message") or "目标监听进程检查完成。"), "checked_at": checked_at}
+        except Exception as exc:
+            # Process visibility is optional diagnostics, including missing
+            # tools or insufficient permission. It must not tear down SSH.
+            return {"process_count": None, "listening": None, "complete": False,
+                    "message": "无法确认目标监听进程：" + str(exc), "checked_at": checked_at}
+
     def _spawn(self, mapping_id, alias, kind, specification):
         if self._closed.is_set():
             raise RuntimeError("程序正在关闭，已取消启动。")
@@ -809,14 +844,27 @@ except OSError as e:
                 raise RuntimeError("程序正在关闭。")
             with self._lock:
                 mapping = self._get(mapping_id)
-                if mapping["status"] in {"running", "degraded"} and (self._processes.get(mapping_id) or mapping_id in self._relays):
-                    return copy.deepcopy(mapping)
-                value = self._validate(mapping)
-                plan = self.preview(value)
-                mapping.update(status="starting", error=None, health=None, usage=None, plan=plan, route=plan["route"], config_changed=False, config_error=False)
-            self._probe_peers.pop(mapping_id, None)
-            self._log(mapping_id, "info", "开始检查监听端口并建立隧道；目标服务可以稍后启动。")
+                mapping.pop("failure_stage", None)
             try:
+                has_resources = bool(self._processes.get(mapping_id) or mapping_id in self._relays)
+                if has_resources and mapping["status"] in {"running", "degraded"}:
+                    # Explicit start verifies the tunnel itself. Target service
+                    # state and process visibility never own tunnel rollback.
+                    result = self.check(mapping_id)
+                    health = result.get("health") or {}
+                    if health.get("tunnel_ok") is not True:
+                        raise RuntimeError(health.get("summary") or "启动后的连接检查未通过。")
+                    return result
+                if has_resources:
+                    # Failed rollback may leave owned resources. Never append
+                    # new SSH legs or overwrite a relay before cleanup succeeds.
+                    self._cleanup(mapping_id)
+                with self._lock:
+                    value = self._validate(mapping)
+                    plan = self.preview(value)
+                    mapping.update(status="starting", error=None, health=None, usage=None, target_usage=None, plan=plan, route=plan["route"], config_changed=False, config_error=False)
+                self._probe_peers.pop(mapping_id, None)
+                self._log(mapping_id, "info", "开始检查监听端口并建立隧道；目标服务可以稍后启动。")
                 available = self._endpoint_check(value["source_host"], "available", value["bind_address"], value["source_port"])
                 if self._closed.is_set():
                     raise RuntimeError("程序正在关闭，已取消启动。")
@@ -847,37 +895,35 @@ except OSError as e:
                     self._wait_ready(mapping_id, entry)
                 with self._lock:
                     # A listener alone does not yet establish availability.
-                    mapping["status"] = "degraded"
-                self._log(mapping_id, "info", "隧道监听已建立，继续分别检查隧道和目标服务状态。")
+                    mapping["status"] = "starting"
+                self._log(mapping_id, "info", "隧道监听已建立，继续检查是否可用。")
+                result = self.check(mapping_id)
+                health = result.get("health") or {}
+                if health.get("tunnel_ok") is not True:
+                    raise RuntimeError(health.get("summary") or "启动后的连接检查未通过。")
+                return result
             except Exception as exc:
+                cleanup_failed = False
                 try:
                     self._cleanup(mapping_id)
                 except Exception as cleanup_error:
-                    exc = RuntimeError(f"{exc}；清理失败：{cleanup_error}")
+                    cleanup_failed = True
+                    exc = RuntimeError(f"{exc}；清理未完成：{cleanup_error}")
+                self._probe_peers.pop(mapping_id, None)
                 with self._lock:
-                    mapping.update(status="error", error=str(exc))
-                self._log(mapping_id, "error", f"启动失败，已清理本次创建的隧道：{exc}")
+                    mapping.update(status="error", error=str(exc), failure_stage="start", usage=None, target_usage=None)
+                cleanup_message = "部分资源清理未完成，已保留所有权记录，可重试" if cleanup_failed else "已清理本次创建的隧道"
+                self._log(mapping_id, "error", f"启动失败，{cleanup_message}：{exc}")
                 raise RuntimeError(str(exc)) from exc
-            # Health diagnostics do not own startup rollback. An unavailable
-            # target (or a failed diagnostic) must not remove a ready tunnel.
-            try:
-                return self.check(mapping_id)
-            except Exception as exc:
-                checked_at = now()
-                message = "无法确认是否可用：连接检查未完成。"
-                with self._lock:
-                    mapping.update(status="degraded", error=message, last_checked=checked_at,
-                                   health={"ok": False, "tunnel_ok": None, "target_ok": None,
-                                           "summary": message, "details": ["已保留隧道，可稍后再次检查。", str(exc)], "checked_at": checked_at})
-                self._log(mapping_id, "warning", f"{message} {exc}")
-                return copy.deepcopy(mapping)
 
     def _cleanup(self, mapping_id):
         with self._lock:
             entries = list(self._processes.get(mapping_id, []))
-            relay = self._relays.pop(mapping_id, None)
+            relay = self._relays.get(mapping_id)
         if relay:
             relay.close()
+            with self._lock:
+                self._relays.pop(mapping_id, None)
         errors = []
         remaining = []
         for entry in reversed(entries):
@@ -895,7 +941,7 @@ except OSError as e:
                 self._processes.pop(mapping_id, None)
         self._save_runtime()
         with self._lock:
-            if mapping_id in self._mappings:
+            if not remaining and mapping_id in self._mappings:
                 self._mappings[mapping_id].pop("relay_port", None)
         if errors:
             self._log(mapping_id, "warning", "清理部分进程时遇到错误：" + "; ".join(errors))
@@ -907,6 +953,7 @@ except OSError as e:
         with self._mapping_locks[mapping_id]:
             with self._lock:
                 mapping = self._get(mapping_id)
+                mapping.pop("failure_stage", None)
                 mapping["status"] = "stopping"
             try:
                 self._cleanup(mapping_id)
@@ -915,7 +962,7 @@ except OSError as e:
                     mapping.update(status="error", error=str(exc))
                 raise
             with self._lock:
-                mapping.update(status="stopped", error=None, health=None, usage=None)
+                mapping.update(status="stopped", error=None, health=None, usage=None, target_usage=None)
                 self._probe_peers.pop(mapping_id, None)
             self._log(mapping_id, "info", "已停止此映射的监听与转发。")
             return copy.deepcopy(mapping)
@@ -924,12 +971,14 @@ except OSError as e:
         self._get(mapping_id)
         with self._mapping_locks[mapping_id]:
             mapping = self._get(mapping_id)
-            if mapping["status"] not in {"running", "degraded"}:
+            if mapping["status"] not in {"starting", "running", "degraded"}:
                 return copy.deepcopy(mapping)
             if mapping.get("config_changed"):
                 message = "SSH 配置已变化，现有隧道未改道；请停止并重新启动后再检查新路径。"
                 with self._lock:
                     mapping.update(status="degraded", error=message, last_checked=now(),
+                                   target_usage={"process_count": None, "listening": None, "complete": False,
+                                                 "checked_at": now(), "message": "SSH 配置已变化，未检查可能不同的目标。"},
                                    usage={"active_connections": None, "in_use": None, "checked_at": now(),
                                           "message": "SSH 配置已变化，未对可能不同的入口采样。"},
                                    health={"ok": False, "tunnel_ok": None, "target_ok": None,
@@ -938,8 +987,9 @@ except OSError as e:
             # Sample before any target/listener probes. Previous startup and
             # health probes are excluded by their actual client endpoints.
             usage = self._sample_usage(mapping_id, mapping)
+            target_usage = self._sample_target_usage(mapping)
             with self._lock:
-                mapping["usage"] = usage
+                mapping.update(usage=usage, target_usage=target_usage)
             details = []
             tunnel_ok = True
             entries = self._processes.get(mapping_id, [])
@@ -953,8 +1003,13 @@ except OSError as e:
                 details.append("找不到本程序持有的转发进程。")
             def probe(host, host_address, host_port):
                 try:
-                    return self._endpoint_check(host, "connect", host_address, host_port)
-                except (OSError, RuntimeError, ValueError) as exc:
+                    result = self._endpoint_check(host, "connect", host_address, host_port)
+                    if not isinstance(result, dict) or not isinstance(result.get("ok"), bool):
+                        raise ValueError("端口检查返回无效结果。")
+                    if "checked" in result and not isinstance(result["checked"], bool):
+                        raise ValueError("端口检查状态无效。")
+                    return {**result, "message": result.get("message") or "TCP 检查未通过。"}
+                except Exception as exc:
                     return {"ok": False, "checked": False, "message": f"检查失败：{exc}"}
 
             target = probe(mapping["target_host"], mapping["target_address"], mapping["target_port"])
@@ -972,19 +1027,19 @@ except OSError as e:
             checked_at = now()
             ok = bool(tunnel_ok and target_ok is True)
             if ok:
-                summary = "可用：连接检查通过。"
+                summary = "隧道已建立；连接检查通过。"
             elif tunnel_ok and target_ok is False:
-                summary = f"不可用：目标设备的 {mapping['target_address']}:{mapping['target_port']} 无法连接。"
+                summary = "隧道已建立；目标 TCP 当前不可达。"
             elif tunnel_ok:
-                summary = "无法确认是否可用：目标检查未完成。"
+                summary = "隧道已建立；目标 TCP 状态未确认。"
             else:
                 summary = "不可用：连接检查失败。"
             health = {"ok": ok, "tunnel_ok": tunnel_ok, "target_ok": target_ok,
                       "summary": summary, "details": details, "checked_at": checked_at}
             with self._lock:
-                mapping.update(health=health, last_checked=checked_at, status="running" if ok else "degraded",
-                               error=None if ok else summary)
-            self._log(mapping_id, "info" if ok else "warning", health["summary"])
+                mapping.update(health=health, last_checked=checked_at, status="running" if tunnel_ok else "degraded",
+                               error=None if tunnel_ok else summary)
+            self._log(mapping_id, "info" if tunnel_ok else "warning", health["summary"])
             return copy.deepcopy(mapping)
 
     def _monitor(self):
@@ -1010,7 +1065,7 @@ except OSError as e:
                         message = "SSH 连接已断开：" + ", ".join(entry["alias"] for entry in failed) + "。已停止相关转发，可手动重新启动。"
                         self._cleanup(mapping_id)
                         with self._lock:
-                            mapping.update(status="error", error=message, usage=None,
+                            mapping.update(status="error", error=message, usage=None, target_usage=None,
                                            health={"ok": False, "tunnel_ok": False, "target_ok": None,
                                                    "summary": message, "details": [message], "checked_at": now()})
                         self._log(mapping_id, "error", message)

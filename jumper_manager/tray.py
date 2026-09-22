@@ -89,7 +89,7 @@ class TrayController:
         self._autostart_thread = None
         self._error: Exception | None = None
         self._status_error: str | None = None
-        self._counts = (0, 0, 0)  # available, unavailable, total
+        self._counts = (0, 0, 0)  # started, faulty, total
         self._has_status = False
         self._last_display = None
         self._last_open = float("-inf")
@@ -201,7 +201,7 @@ class TrayController:
                 and not mapping.get("error")
                 and not mapping.get("config_changed")
                 and isinstance(mapping.get("health"), Mapping)
-                and all(mapping["health"].get(field) is True for field in ("ok", "tunnel_ok", "target_ok"))
+                and mapping["health"].get("tunnel_ok") is True
                 for mapping in valid_mappings
             )
             unavailable = sum(mapping.get("status") in {"running", "degraded", "error"}
@@ -329,7 +329,7 @@ class TrayController:
             if not self._has_status:
                 return "正在读取映射状态…"
             available, unavailable, total = self._counts
-            return f"可用 {available}/总数 {total} · 不可用 {unavailable}"
+            return f"已启动 {available}/总数 {total} · 异常 {unavailable}"
 
     def _exit_text(self, _item=None):
         return "正在退出…" if self._exit_requested.is_set() else "退出 JumperManager（停止映射）"
@@ -344,7 +344,7 @@ class TrayController:
                 title = "JumperManager · 状态读取失败，请查看日志"
             else:
                 available, unavailable, total = self._counts
-                title = f"JumperManager · 可用 {available}/总数 {total} · 不可用 {unavailable}"
+                title = f"JumperManager · 已启动 {available}/总数 {total} · 异常 {unavailable}"
             signature = (title, self._status_text(), self._autostart_text(),
                          self._autostart_checked(), self._autostart_available())
             if signature == self._last_display:

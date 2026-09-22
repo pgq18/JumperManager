@@ -971,10 +971,6 @@ h1 {
   font: 12px var(--font);
 }
 
-.graph-edge-label.available,.graph-column-label.available {
-  fill: #64bbaa;
-}
-
 .graph-column-label {
   fill: #4b617c;
   font: 11px var(--mono);
@@ -1154,13 +1150,7 @@ h1 {
   background: currentColor;
 }
 
-.status-badge.available {
-  color: var(--accent);
-  border-color: #36d4b720;
-  background: #36d4b70b;
-}
-
-.status-badge.unavailable {
+.status-badge.unavailable,.status-badge.start_failed {
   color: var(--danger);
   border-color: #f08c8d25;
   background: #f08c8d0b;
@@ -1274,6 +1264,12 @@ h1 {
   line-height: 1.6;
   margin-top: 11px;
   overflow-wrap: anywhere;
+}
+
+.status-badge.started {
+  color: var(--muted);
+  background: #8191a70a;
+  border-color: #8191a725;
 }
 
 .mapping-order-hint {
@@ -1448,8 +1444,13 @@ h1 {
   font-size: 12px;
 }
 
-.graph-edge.mapping.available {
-  stroke: var(--accent);
+.graph-edge.mapping.started {
+  stroke: #8191a7;
+  stroke-dasharray: none;
+}
+
+.graph-column-label.started,.graph-edge-label.started {
+  fill: var(--muted);
 }
 
 .graph-edge.mapping.unavailable {
@@ -1457,12 +1458,9 @@ h1 {
   stroke-dasharray: 5 4;
 }
 
-.graph-edge-label.unavailable,.graph-column-label.unavailable,.graph-node.unavailable .node-kind {
+.graph-edge-label.unavailable,.graph-column-label.unavailable,.graph-node.unavailable .node-kind,
+.graph-edge-label.start_failed,.graph-column-label.start_failed,.graph-node.start_failed .node-kind {
   fill: var(--danger);
-}
-
-.graph-node.available .node-kind,.graph-node.available .node-title {
-  fill: #64bbaa;
 }
 
 .mapping-unavailable,.mapping-notice {

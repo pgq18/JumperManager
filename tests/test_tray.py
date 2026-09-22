@@ -143,29 +143,25 @@ class TrayTests(unittest.TestCase):
             mapping["health"] = {"ok": True, "tunnel_ok": True, "target_ok": True}
         self.controller.start()
         icon = self.controller._icon
-        wait_for(lambda: "可用 2/总数 5" in icon.title)
-        self.assertIn("不可用 2", icon.title)
+        wait_for(lambda: "已启动 2/总数 5" in icon.title)
+        self.assertIn("异常 2", icon.title)
         status_item = icon.menu.items[1]
         self.assertFalse(status_item.enabled)
-        self.assertEqual(status_item.text, "可用 2/总数 5 · 不可用 2")
+        self.assertEqual(status_item.text, "已启动 2/总数 5 · 异常 2")
         for term in ("运行", "降级", "等待"):
             self.assertNotIn(term, icon.title)
             self.assertNotIn(term, status_item.text)
         previous_updates = icon.updates
         self.status["mappings"] = [{"status": "stopped"}]
-        wait_for(lambda: "可用 0/总数 1" in icon.title)
-        self.assertIn("不可用 0", icon.title)
+        wait_for(lambda: "已启动 0/总数 1" in icon.title)
+        self.assertIn("异常 0", icon.title)
         self.assertGreater(icon.updates, previous_updates)
 
-    def test_only_active_complete_health_counts_as_available(self):
+    def test_started_count_requires_established_tunnel_but_not_target_service(self):
         healthy = {"ok": True, "tunnel_ok": True, "target_ok": True}
         cases = [
-            {"status": "running", "health": {**healthy, "target_ok": False}},
-            {"status": "running", "health": {**healthy, "target_ok": None}},
             {"status": "running", "health": {**healthy, "tunnel_ok": False}},
-            {"status": "running", "health": {**healthy, "ok": False}},
-            {"status": "running", "health": {**healthy, "ok": 1}},
-            {"status": "running", "health": {**healthy, "target_ok": 1}},
+            {"status": "running", "health": {**healthy, "tunnel_ok": 1}},
             {"status": "running", "health": {"ok": True}},
             {"status": "running", "health": None},
             {"status": "running", "health": []},
@@ -177,19 +173,22 @@ class TrayTests(unittest.TestCase):
             with self.subTest(mapping=mapping):
                 self.status["mappings"] = [mapping]
                 self.controller._refresh_status()
-                unavailable = int(mapping["status"] in {"running", "degraded", "error"})
-                self.assertEqual(self.controller._status_text(), f"可用 0/总数 1 · 不可用 {unavailable}")
-        self.status["mappings"] = [{"status": "running", "health": healthy}]
-        self.controller._refresh_status()
-        self.assertEqual(self.controller._status_text(), "可用 1/总数 1 · 不可用 0")
+                faulty = int(mapping["status"] in {"running", "degraded", "error"})
+                self.assertEqual(self.controller._status_text(), f"已启动 0/总数 1 · 异常 {faulty}")
+        for target_ok in (True, False, None):
+            with self.subTest(target_ok=target_ok):
+                self.status["mappings"] = [{"status": "running", "health": {"ok": target_ok is True, "tunnel_ok": True, "target_ok": target_ok}}]
+                self.controller._refresh_status()
+                self.assertEqual(self.controller._status_text(), "已启动 1/总数 1 · 异常 0")
 
-    def test_target_recovery_updates_available_count(self):
+    def test_target_without_listener_does_not_raise_tray_alarm(self):
         self.status["mappings"] = [{"status": "running", "health": {"ok": False, "tunnel_ok": True, "target_ok": False}}]
         self.controller.start()
         icon = self.controller._icon
-        wait_for(lambda: "可用 0/总数 1 · 不可用 1" in icon.title)
+        wait_for(lambda: "已启动 1/总数 1 · 异常 0" in icon.title)
         self.status["mappings"] = [{"status": "running", "health": {"ok": True, "tunnel_ok": True, "target_ok": True}}]
-        wait_for(lambda: "可用 1/总数 1 · 不可用 0" in icon.title)
+        self.controller._refresh_status()
+        self.assertIn("已启动 1/总数 1 · 异常 0", icon.title)
         self.assertEqual(self.exit_calls, [])
 
     def test_exit_runs_off_callback_thread_and_only_once(self):
@@ -304,8 +303,8 @@ class TrayTests(unittest.TestCase):
             self.controller.start()
             wait_for(lambda: "状态读取失败" in self.controller._icon.title)
         problem["fail"] = False
-        wait_for(lambda: "可用 1/总数 1" in self.controller._icon.title)
-        self.assertIn("可用 1/总数 1", self.controller._status_text())
+        wait_for(lambda: "已启动 1/总数 1" in self.controller._icon.title)
+        self.assertIn("已启动 1/总数 1", self.controller._status_text())
 
     def test_stop_before_start_and_non_windows_error(self):
         self.controller.stop()

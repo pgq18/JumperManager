@@ -98,11 +98,15 @@ class UsageTests(unittest.TestCase):
         self.refresh = patch.object(Manager, "refresh_hosts", fake_refresh)
         self.refresh.start()
         self.manager = Manager(self.root, str(self.root / "config"))
+        self.target_snapshot = patch.object(self.manager, "_target_process_snapshot", return_value=
+                                            {"process_count": 0, "listening": False, "complete": True, "message": "没有进程在用"})
+        self.target_snapshot.start()
 
     def tearDown(self):
         # All SSH entries below are test doubles, never OS process handles.
         self.manager._processes.clear()
         self.manager.close()
+        self.target_snapshot.stop()
         self.refresh.stop()
         self.directory.__exit__(None, None, None)
 
@@ -153,9 +157,9 @@ class UsageTests(unittest.TestCase):
              patch.object(self.manager, "_endpoint_check", side_effect=probe):
             result = self.manager.check(mapping["id"])
         self.assertEqual(actions, ["snapshot", "server-b", "server-a"])
-        self.assertEqual(result["status"], "degraded")
+        self.assertEqual(result["status"], "running")
         self.assertFalse(result["health"]["target_ok"])
-        self.assertEqual(result["error"], "不可用：目标设备的 127.0.0.1:50051 无法连接。")
+        self.assertIsNone(result["error"])
         self.assertEqual(result["usage"]["active_connections"], 1)
         self.assertTrue(result["usage"]["in_use"])
         self.assertIn(("127.0.0.1", 40003), self.manager._probe_peers[mapping["id"]])

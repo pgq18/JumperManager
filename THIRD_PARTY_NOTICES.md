@@ -110,4 +110,4 @@ application runtime components in the examined executable. If future builds
 include additional runtime files or native libraries, update this inventory
 and retain their corresponding notices.
 
-Matching application and dependency sources, together with rebuild instructions, are provided in `JumperManager-Source-v1.1.2.zip` on the [release page](https://github.com/pgq18/JumperManager/releases/tag/v1.1.2). See also [SOURCE.md](SOURCE.md).
+Matching application and dependency sources, together with rebuild instructions, are provided in `JumperManager-Source-v1.1.6.zip` on the [release page](https://github.com/pgq18/JumperManager/releases/tag/v1.1.6). See also [SOURCE.md](SOURCE.md).

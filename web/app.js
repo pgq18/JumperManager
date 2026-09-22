@@ -39,7 +39,7 @@
     arrowUp: ["M12 20V4 M5 11l7-7 7 7"],
     arrowDown: ["M12 4v16 M5 13l7 7 7-7"],
   };
-  const STATUS = { stopped: "已停止", starting: "启动中", stopping: "停止中", available: "可用", unavailable: "不可用", unchecked: "未检查", unconfirmed: "未确认" };
+  const STATUS = { stopped: "已停止", starting: "启动中", stopping: "停止中", started: "已启动", unavailable: "异常", start_failed: "启动失败", unchecked: "未检查", unconfirmed: "未确认" };
   const ROLES = { source: "访问入口", relay: "本机", local: "本机", gateway: "中间设备", jump: "中间设备", target: "目标服务", destination: "目标服务" };
   const state = {
     data: { hosts: [], mappings: [], ssh_config: "" }, token: null, sessionPromise: null,
@@ -98,30 +98,39 @@
   }
   function mappingStatus(mapping) {
     if (["stopped", "starting", "stopping"].includes(mapping.status)) return mapping.status;
-    if (mapping.error || mapping.config_changed || ["error", "degraded"].includes(mapping.status)) return "unavailable";
+    if (mapping.status === "error" && mapping.failure_stage === "start") return "start_failed";
+    if (mapping.error || mapping.config_changed || mapping.status === "error") return "unavailable";
     const health = mapping.health;
-    if (health?.ok === false || health?.target_ok === false || health?.tunnel_ok === false) return "unavailable";
-    if (mapping.status === "running" && health?.ok === true && health.target_ok === true && health.tunnel_ok === true) return "available";
+    if (health?.tunnel_ok === false) return "unavailable";
+    if (mapping.status === "running" || (mapping.status === "degraded" && health?.tunnel_ok === true)) return "started";
     return !health && !mapping.last_checked ? "unchecked" : "unconfirmed";
   }
-  function isAvailable(mapping) { return mappingStatus(mapping) === "available"; }
-  function needsAttention(mapping) { return mappingStatus(mapping) === "unavailable"; }
-  function usageSummary(mapping) {
+  function isStarted(mapping) { return mappingStatus(mapping) === "started"; }
+  function needsAttention(mapping) { return ["unavailable", "start_failed"].includes(mappingStatus(mapping)); }
+  function clientUsageSummary(mapping) {
     const usage = mapping.usage;
     const count = Number.isInteger(usage?.active_connections) && usage.active_connections >= 0 ? usage.active_connections : null;
     return { count, inUse: count === null ? null : count > 0, checkedAt: usage?.checked_at || null,
       text: count === null ? "使用情况未知" : count > 0 ? `使用中 · ${count} 个连接` : "暂无客户端连接" };
   }
+  function targetProcessSummary(mapping) {
+    const usage = mapping.target_usage;
+    const validCount = usage?.complete === true && Number.isInteger(usage.process_count) && usage.process_count >= 0;
+    const count = validCount && ((usage.process_count === 0 && usage.listening === false) || (usage.process_count > 0 && usage.listening === true)) ? usage.process_count : null;
+    return { count, hasProcesses: usage?.listening === true, checkedAt: usage?.checked_at || null,
+      text: count === 0 ? "没有进程在用" : count > 0 ? `有 ${count} 个进程在用` : usage?.listening === true ? "检测到服务，进程数未知" : usage?.checked_at ? "进程状态未知" : "尚未检查进程" };
+  }
   function addressLabel(address, port) { return `${String(address).includes(":") && !String(address).startsWith("[") ? `[${address}]` : address}:${port}`; }
   function unavailableReason(mapping) {
+    if (mapping.status === "error" && mapping.failure_stage === "start" && mapping.error) return String(mapping.error).split(/\r?\n/).find((line) => line.trim())?.trim() || "启动失败，请展开“诊断详情”查看原因。";
     if (mapping.config_changed) return "设备配置已更改，请停止后重新启动此映射。";
-    if (mapping.health?.target_ok === false) return `无法连接到 ${hostLabel(mapping.target_host)} 的 ${addressLabel(mapping.target_address || "127.0.0.1", mapping.target_port)}。`;
-    if (mapping.health?.tunnel_ok === false || mapping.error) return `无法访问 ${hostLabel(mapping.target_host)}，请展开“诊断详情”查看原因。`;
+    if (mapping.error) return String(mapping.error).split(/\r?\n/).find((line) => line.trim())?.trim() || "映射发生异常，请展开“诊断详情”查看原因。";
+    if (mapping.health?.tunnel_ok === false) return "无法建立映射，请展开“诊断详情”查看原因。";
     return `无法确认 ${hostLabel(mapping.target_host)} 的服务是否可用，请稍后重新检查。`;
   }
   function matchesStatusFilter(mapping, filter) {
     if (filter === "all") return true;
-    if (filter === "available" || filter === "running") return isAvailable(mapping);
+    if (filter === "started" || filter === "running") return isStarted(mapping);
     if (filter === "unavailable" || filter === "attention") return needsAttention(mapping);
     if (filter === "unconfirmed") return ["unchecked", "unconfirmed"].includes(mappingStatus(mapping));
     return filter === mappingStatus(mapping);
@@ -129,10 +138,11 @@
   function mappingActionFeedback(mapping, action) {
     const status = mappingStatus(mapping);
     if (action === "stop") return mapping.status === "stopped" ? { message: `已停止「${mapping.name}」`, neutral: true } : { message: "映射未能停止，请展开“诊断详情”查看原因。", error: true };
-    if (status === "available") return { message: `「${mapping.name}」可用。${usageSummary(mapping).text}。` };
-    if (status === "unavailable") return { message: `「${mapping.name}」不可用：${unavailableReason(mapping)}`, error: true };
+    if (status === "started") return { message: `${action === "start" ? `「${mapping.name}」启动成功` : "检查已完成"}。${targetProcessSummary(mapping).text}。`, neutral: true };
+    if (status === "start_failed") return { message: `「${mapping.name}」启动失败：${unavailableReason(mapping)}`, error: true };
+    if (status === "unavailable") return { message: `「${mapping.name}」发生异常：${unavailableReason(mapping)}`, error: true };
     if (status === "stopped") return { message: "映射尚未启动，未执行检查。请先启动映射。", neutral: true };
-    return { message: `尚未确认「${mapping.name}」是否可用，请点击“检查”重试。`, neutral: true };
+    return { message: `检查尚未完成。${targetProcessSummary(mapping).text}。`, neutral: true };
   }
   function statusBadge(mapping) { const status = mappingStatus(mapping); return el("span", `status-badge ${STATUS[status] ? status : "stopped"}`, STATUS[status] || status || "未知状态"); }
   function setBusyButton(node, busy, text) {
@@ -227,12 +237,12 @@
     const { hosts, mappings } = state.data;
     $("statHosts").textContent = hosts.filter((h) => h.id !== "local").length;
     $("statTotal").textContent = mappings.length;
-    $("statRunning").textContent = mappings.filter(isAvailable).length;
-    $("runningHint").textContent = "最近检查确认可用";
+    $("statRunning").textContent = mappings.filter(isStarted).length;
+    $("runningHint").textContent = "后台映射已开启";
     const attention = mappings.filter(needsAttention).length;
     $("statAttention").textContent = attention;
     $("statAttention").style.color = attention ? "var(--danger)" : "";
-    $("attentionHint").textContent = attention ? "选择映射查看原因" : "暂无不可用映射";
+    $("attentionHint").textContent = attention ? "选择映射查看原因" : "暂无异常映射";
     $("navMappingCount").textContent = mappings.length;
     $("navHostCount").textContent = hosts.filter((h) => h.id !== "local").length;
     $("mappingCount").textContent = mappings.length;
@@ -416,14 +426,14 @@
       const endpoints = el("div", "mapping-endpoints");
       const sep = el("span", "endpoint-separator"); sep.append(icon("arrowRight"), el("span", "relay-label", "经本机"), icon("arrowRight"));
       endpoints.append(endpoint(mapping.source_host, mapping.source_port), sep, endpoint(mapping.target_host, mapping.target_port));
-      const usage = usageSummary(mapping);
+      const usage = targetProcessSummary(mapping);
       const snapshot = el("div", "mapping-snapshot");
-      const usageLabel = el("span", `usage-badge${usage.inUse ? " in-use" : ""}`, usage.text);
-      usageLabel.title = "已建立的客户端连接快照，不是进程数量；启动或点击检查时更新。";
+      const usageLabel = el("span", `usage-badge${usage.hasProcesses ? " in-use" : ""}`, usage.text);
+      usageLabel.title = "目标设备上监听此端口的真实进程数；启动或点击检查时更新。";
       snapshot.append(usageLabel);
       const bottom = el("div", "mapping-row-bottom");
       const busy = state.busy.get(mapping.id);
-      const label = busy ? { start: "正在启动…", stop: "正在停止…", check: "正在检查…", delete: "正在删除…" }[busy] : usage.checkedAt ? `使用快照 ${formatTime(usage.checkedAt)} · 启动/检查时更新` : "使用情况尚未采样 · 启动或点击检查更新";
+      const label = busy ? { start: "正在启动…", stop: "正在停止…", check: "正在检查…", delete: "正在删除…" }[busy] : usage.checkedAt ? `进程快照 ${formatTime(usage.checkedAt)} · 启动/检查时更新` : "尚未检查进程 · 启动或点击检查更新";
       bottom.append(el("span", "mapping-meta", label));
       const actions = el("div", "mapping-actions");
       const active = ["running", "starting", "degraded", "stopping"].includes(mapping.status);
@@ -461,29 +471,33 @@
     container.replaceChildren();
     const mapping = selectedMapping();
     if (!mapping) {
-      const empty = emptyState("映射信息，一目了然", "选择一条映射，查看可用性、使用情况和诊断信息。", "topology");
+      const empty = emptyState("映射信息，一目了然", "选择一条映射，查看目标进程、映射状态和诊断信息。", "topology");
       empty.style.minHeight = "235px"; empty.style.padding = "25px 3px"; container.append(empty); return;
     }
     container.dataset.mappingId = mapping.id;
     const top = el("div", "detail-name-row"); top.append(el("h3", "", mapping.name), statusBadge(mapping));
     container.append(top, el("p", "detail-desc", `在 ${hostLabel(mapping.source_host)} 上访问 ${hostLabel(mapping.target_host)} 的服务。`));
     if (needsAttention(mapping)) container.append(el("p", "mapping-unavailable", unavailableReason(mapping)));
-    if (["unchecked", "unconfirmed"].includes(mappingStatus(mapping))) container.append(el("p", "mapping-notice", "尚未确认是否可用，点击“检查”更新结果。"));
+    if (["unchecked", "unconfirmed"].includes(mappingStatus(mapping))) container.append(el("p", "mapping-notice", "点击“检查”更新映射与目标进程状态。"));
     container.append(kv("访问地址", addressLabel(mapping.bind_address || "127.0.0.1", mapping.source_port)));
     container.append(kv("目标地址", addressLabel(mapping.target_address || "127.0.0.1", mapping.target_port)));
     const checkedAt = mapping.last_checked || mapping.health?.checked_at;
-    container.append(el("p", "detail-check-time", checkedAt ? `上次检查 ${formatTime(checkedAt, true)}` : "尚未检查可用性"));
-    const usage = usageSummary(mapping);
+    container.append(el("p", "detail-check-time", checkedAt ? `上次检查 ${formatTime(checkedAt, true)}` : "尚未检查"));
+    const usage = targetProcessSummary(mapping);
     const usageBox = el("div", "usage-details");
-    usageBox.append(el("h4", "detail-section-label", "客户端使用情况"), el("strong", `usage-summary${usage.inUse ? " in-use" : ""}`, usage.text));
-    usageBox.append(el("p", "usage-timestamp", usage.checkedAt ? `采样于 ${formatTime(usage.checkedAt, true)}` : "尚无使用情况快照"));
-    usageBox.append(el("small", "", "仅在启动或点击“检查”时更新。这里统计客户端连接数，不代表进程数量；可用不等于有人正在使用。"));
+    usageBox.append(el("h4", "detail-section-label", "目标端口进程"), el("strong", `usage-summary${usage.hasProcesses ? " in-use" : ""}`, usage.text));
+    usageBox.append(el("p", "usage-timestamp", usage.checkedAt ? `采样于 ${formatTime(usage.checkedAt, true)}` : "尚无进程快照"));
+    usageBox.append(el("small", "", "仅在启动或点击“检查”时更新。统计目标端口的监听进程，不按客户端连接数量计算。"));
     container.append(usageBox);
     const diagnostics = el("details", "mapping-diagnostics"); diagnostics.open = !!diagnosticsOpen;
     diagnostics.append(el("summary", "", "诊断详情"));
     if (mapping.error) diagnostics.append(el("p", "diagnostic-error", mapping.error));
     if (mapping.health?.summary) diagnostics.append(el("p", "", mapping.health.summary));
     for (const item of Array.isArray(mapping.health?.details) ? mapping.health.details : []) diagnostics.append(el("p", "", typeof item === "string" ? item : JSON.stringify(item)));
+    if (mapping.target_usage?.message) diagnostics.append(el("p", "", mapping.target_usage.message));
+    const clientUsage = clientUsageSummary(mapping);
+    diagnostics.append(el("h4", "detail-section-label", "客户端连接（诊断）"), el("p", "", clientUsage.text));
+    if (clientUsage.checkedAt) diagnostics.append(el("p", "", `采样于 ${formatTime(clientUsage.checkedAt, true)}`));
     if (mapping.usage?.message) diagnostics.append(el("p", "", mapping.usage.message));
     if (mapping.plan?.description) diagnostics.append(el("p", "", mapping.plan.description));
     if (mapping.relay_port) diagnostics.append(kv("本机中转端口", String(mapping.relay_port)));
@@ -705,8 +719,8 @@
   function drawNode(svg, info) {
     const { x, y, host, role, port, step, status, titleOverride } = info;
     const local = host === "local"; const h = hostById(host) || { id: host, alias: host, hostname: host };
-    const available = status === "available", unavailable = status === "unavailable";
-    const palette = available ? { bg: "#17312f", border: "#32675c", tile: "#215145", icon: "#59d8bc", dot: "#36d4b7" } : unavailable ? { bg: "#2b1d24", border: "#75414b", tile: "#402731", icon: "#f08c8d", dot: "#f08c8d" } : { bg: "#162333", border: "#30435b", tile: "#213348", icon: "#8aabce", dot: "#8191a7" };
+    const unavailable = ["unavailable", "start_failed"].includes(status);
+    const palette = unavailable ? { bg: "#2b1d24", border: "#75414b", tile: "#402731", icon: "#f08c8d", dot: "#f08c8d" } : { bg: "#162333", border: "#30435b", tile: "#213348", icon: "#8aabce", dot: "#8191a7" };
     const group = svgEl("g", { class: `graph-node${local ? " local" : ""}${status ? ` ${status}` : ""}`, transform: `translate(${x - GRAPH.nodeWidth / 2},${y - GRAPH.nodeHeight / 2})`, tabindex: "0", role: "button", "aria-label": `查看设备 ${hostLabel(host)}${port ? `，端口 ${port}` : ""}${status ? `，映射${STATUS[status]}` : ""}` });
     const fittedLabels = [];
     const addLabel = (attrs, value, maxWidth, fontSize) => {
@@ -733,7 +747,7 @@
   function renderGraph() {
     const availableWidth = graphViewportWidth();
     if (availableWidth <= 0) return;
-    const signature = JSON.stringify([availableWidth, state.graphMode, state.selected, state.data.hosts, state.data.mappings.map((m) => ({ id: m.id, status: mappingStatus(m), usage: m.usage, route: routeFor(m), relay: m.relay_port }))]);
+    const signature = JSON.stringify([availableWidth, state.graphMode, state.selected, state.data.hosts, state.data.mappings.map((m) => ({ id: m.id, status: mappingStatus(m), targetUsage: m.target_usage, route: routeFor(m), relay: m.relay_port }))]);
     if (signature === state.graphSignature) return;
     state.graphSignature = signature;
     document.querySelectorAll("[data-graph]").forEach((node) => { const active = node.dataset.graph === state.graphMode; node.classList.toggle("active", active); node.setAttribute("aria-pressed", String(active)); });
@@ -748,17 +762,17 @@
     const route = routeFor(mapping);
     const layout = mappingGraphLayout(route, graphViewportWidth());
     const svg = makeSvgBase(layout);
-    const status = mappingStatus(mapping), available = status === "available", unavailable = status === "unavailable";
-    const usage = usageSummary(mapping);
+    const status = mappingStatus(mapping), unavailable = needsAttention(mapping);
+    const usage = targetProcessSummary(mapping);
     const { coordinates, width } = layout;
     for (let i = 1; i < coordinates.length; i++) {
       const prev = coordinates[i - 1], next = coordinates[i]; const middle = (prev.x + next.x) / 2;
-      svg.append(svgEl("path", { class: `graph-edge mapping ${available ? "available" : unavailable ? "unavailable" : "inactive"}${available && usage.inUse ? " in-use" : ""}`, d: `M${prev.x + GRAPH.nodeWidth / 2} ${prev.y}H${next.x - GRAPH.nodeWidth / 2 - 7}`, "marker-end": `url(#${available ? "arrow-flow" : unavailable ? "arrow-unavailable" : "arrow-muted"})` }));
+      svg.append(svgEl("path", { class: `graph-edge mapping ${unavailable ? "unavailable" : status === "started" ? "started" : "inactive"}`, d: `M${prev.x + GRAPH.nodeWidth / 2} ${prev.y}H${next.x - GRAPH.nodeWidth / 2 - 7}`, "marker-end": `url(#${unavailable ? "arrow-unavailable" : "arrow-muted"})` }));
       svg.append(svgEl("text", { x: middle, y: prev.y - 13, class: `graph-edge-label ${status}`, "text-anchor": "middle" }, "访问方向"));
     }
     coordinates.forEach((node) => drawNode(svg, { ...node, status: mappingStatus(mapping) }));
     svg.append(svgEl("text", { x: width / 2, y: 239, class: `graph-column-label ${status}`, "text-anchor": "middle" }, `映射${STATUS[status]}`));
-    $("graphCaption").textContent = unavailable ? unavailableReason(mapping) : `${hostLabel(mapping.source_host)} → ${hostLabel(mapping.target_host)}，映射${STATUS[status]}。${available ? `${usage.text}（启动或检查时的快照）。` : ["unchecked", "unconfirmed"].includes(status) ? "点击“检查”确认是否可用。" : ""}`;
+    $("graphCaption").textContent = unavailable ? unavailableReason(mapping) : `${hostLabel(mapping.source_host)} → ${hostLabel(mapping.target_host)}，映射${STATUS[status]}。${usage.text}（启动或检查时更新）。`;
   }
   function renderSSHGraph() {
     const all = state.data.hosts.length ? state.data.hosts : [{ id: "local", alias: "local", label: "本机", hostname: "127.0.0.1" }];
