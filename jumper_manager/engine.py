@@ -1,7 +1,6 @@
 """JumperManager: config-driven, loopback-only, owned SSH port mappings."""
 from __future__ import annotations
 
-import base64
 import copy
 from datetime import datetime, timezone
 import ipaddress
@@ -17,8 +16,11 @@ import threading
 import time
 import uuid
 
-from .connections import local_connections, peer_key, remote_snapshot_script
-from .target_processes import local_target_processes, remote_target_process_script
+from .connections import local_connections, peer_key
+from .target_processes import local_target_processes
+from .remote_linux import (remote_snapshot_script, parse_connection_snapshot,
+                           remote_target_process_script, parse_target_snapshot)
+from .ssh_probe import ssh_tcp_check
 from .processes import WindowsJob, hidden_options, identity, terminate_owned
 from .ssh_config import ALIAS_RE, discover_aliases, parse_effective_config, route_for, simple_proxy, configuration_signature
 
@@ -429,7 +431,7 @@ class Manager:
                          f"本机通过 SSH 登录 {source}，建立 -R，将远端监听连接至该中转端口。"]
             warnings.append("状态检查验证 SSH、监听端口及目标 TCP 可达性；不等同于应用协议健康检查。")
             if source != "local" or target != "local":
-                warnings.append("映射依赖本机持续开机、联网；远端端口检查需要 python3。")
+                warnings.append("映射依赖本机持续开机、联网；进程统计可能受到远端系统权限限制。")
             return {"route": route, "description": f"{start_endpoint} → {'本机中转 → ' if source != 'local' else ''}{target_endpoint}",
                     "warnings": list(dict.fromkeys(warnings)), "steps": steps}
 
@@ -638,47 +640,21 @@ class Manager:
             hint = "SSH 密钥认证失败，请检查 SSH User、IdentityFile 和 ssh-agent。 "
         elif "Address already in use" in message or "remote port forwarding failed" in message:
             hint = "监听端口被占用或 SSH 服务禁止转发；本程序不会关闭其他程序的隧道。 "
-        elif "python3" in message and ("not found" in message or "不是" in message):
-            hint = "远端缺少 python3，无法执行安全的端口检查；请安装 python3 后重试。 "
         return hint + (message or "SSH 操作失败，未返回详细错误。")
 
     def _endpoint_check(self, host, operation, host_address, host_port):
         if host == "local":
             return local_socket_check(operation, host_address, host_port)
-        payload = base64.b64encode(json.dumps({"operation": operation, "address": host_address, "port": host_port}).encode()).decode()
-        # Only the fixed command is interpreted by the remote shell; all user data
-        # is encoded and delivered over stdin, never interpolated into shell code.
-        script = "import base64,json,os,socket\np=json.loads(base64.b64decode('" + payload + "'))\n"
-        # Match OpenSSH's POSIX listener policy: TIME_WAIT is reusable, an
-        # existing listener is not. Also verify that this socket can listen;
-        # OpenSSH checks again when acquiring the actual listener after probing.
-        # Never use SO_REUSEPORT or Windows SO_REUSEADDR to bypass conflicts.
-        script += """try:
- probe_peer=None
- if p['operation']=='available':
-  with socket.socket(socket.AF_INET6 if ':' in p['address'] else socket.AF_INET) as s:
-   if os.name=='nt' and hasattr(socket,'SO_EXCLUSIVEADDRUSE'):
-    s.setsockopt(socket.SOL_SOCKET,socket.SO_EXCLUSIVEADDRUSE,1)
-   elif os.name!='nt':
-    s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
-   s.bind((p['address'],p['port']))
-   s.listen(1)
- else:
-  with socket.create_connection((p['address'],p['port']),4) as s:
-   probe_peer=list(s.getsockname()[:2])
- print('JM_RESULT:'+json.dumps({'ok':True,'message':'TCP check passed','probe_peer':probe_peer}))
-except OSError as e:
- print('JM_RESULT:'+json.dumps({'ok':False,'message':str(e),'errno':e.errno}))
-"""
+        if operation == "available":
+            # Let the real -R request acquire the port atomically. Its
+            # ExitOnForwardFailure/readiness acknowledgment is authoritative;
+            # an extra bind-and-release probe both races and needs remote code.
+            return {"ok": True, "checked": False, "message": "由 SSH 在启动时确认监听端口是否可用。"}
+        config = self._effective.get(host, {})
+        if config.get("localforward") or config.get("remoteforward"):
+            return {"ok": False, "checked": False, "message": "此 SSH 别名含有额外转发配置，无法单独检查目标端口。"}
         try:
-            result = self._run([*self._ssh_args(host, probe=True), host, "python3 -"], input=script, timeout=25)
-            for line in reversed(result.stdout.splitlines()):
-                if line.startswith("JM_RESULT:"):
-                    checked = json.loads(line.removeprefix("JM_RESULT:"))
-                    if not isinstance(checked, dict) or not isinstance(checked.get("ok"), bool):
-                        raise ValueError("远端端口检查返回了无效结果。")
-                    return {**checked, "checked": True}
-            return {"ok": False, "checked": False, "message": self._diagnostic(result.stderr or result.stdout)}
+            return ssh_tcp_check(self._ssh_args(host), host, host_address, host_port)
         except (OSError, RuntimeError, ValueError) as exc:
             return {"ok": False, "checked": False, "message": str(exc)}
 
@@ -699,22 +675,11 @@ except OSError as e:
     def _connection_snapshot(self, host, host_address, host_port):
         if host == "local":
             return local_connections(host_address, host_port)
-        result = self._run([*self._ssh_args(host, probe=True), host, "python3 -"],
+        result = self._run([*self._ssh_args(host, probe=True), host, "sh -s"],
                            input=remote_snapshot_script(host_address, host_port), timeout=25)
         if result.returncode:
             raise RuntimeError(self._diagnostic(result.stderr or result.stdout))
-        for line in reversed(result.stdout.splitlines()):
-            if line.startswith("JM_CONNECTIONS:"):
-                data = json.loads(line.removeprefix("JM_CONNECTIONS:"))
-                if not isinstance(data, dict) or data.get("ok") is not True:
-                    raise RuntimeError(data.get("message", "远端连接采样失败。") if isinstance(data, dict) else "远端连接采样返回无效结果。")
-                peers = data.get("peers")
-                if not isinstance(peers, list) or any(not isinstance(item, list) or len(item) != 2
-                                                      or isinstance(item[1], bool) or not isinstance(item[1], int)
-                                                      or not 1 <= item[1] <= 65535 for item in peers):
-                    raise ValueError("远端连接采样返回无效结果。")
-                return {peer_key(*item) for item in peers}
-        raise RuntimeError(self._diagnostic(result.stderr or result.stdout))
+        return parse_connection_snapshot(result.stdout, host_address, host_port)
 
     def _sample_usage(self, mapping_id, mapping):
         checked_at = now()
@@ -729,7 +694,7 @@ except OSError as e:
             # client indefinitely despite the diagnostic having closed hours ago.
             self._probe_peers[mapping_id] = excluded
             return {"active_connections": count, "in_use": count > 0, "checked_at": checked_at,
-                    "message": f"入口当前有 {count} 个 ESTABLISHED 客户端 TCP 连接；已排除本映射的健康检查连接。瞬时快照不代表进程数量或正在传输数据。"}
+                    "message": f"入口当前有 {count} 个 ESTABLISHED 客户端 TCP 连接；已排除可识别的本机检查连接；远端检查连接会在检查结束时关闭。瞬时快照不代表进程数量或正在传输数据。"}
         except (OSError, RuntimeError, ValueError, TypeError) as exc:
             return {"active_connections": None, "in_use": None, "checked_at": checked_at,
                     "message": "无法获取入口连接快照：" + str(exc)}
@@ -737,14 +702,11 @@ except OSError as e:
     def _target_process_snapshot(self, host, host_address, host_port):
         if host == "local":
             return local_target_processes(host_address, host_port)
-        result = self._run([*self._ssh_args(host, probe=True), host, "python3 -"],
+        result = self._run([*self._ssh_args(host, probe=True), host, "sh -s"],
                            input=remote_target_process_script(host_address, host_port), timeout=25)
         if result.returncode:
             raise RuntimeError(self._diagnostic(result.stderr or result.stdout))
-        for line in reversed(result.stdout.splitlines()):
-            if line.startswith("JM_TARGET_PROCESSES:"):
-                return json.loads(line.removeprefix("JM_TARGET_PROCESSES:"))
-        raise RuntimeError(self._diagnostic(result.stderr or result.stdout))
+        return parse_target_snapshot(result.stdout, host_address, host_port)
 
     def _sample_target_usage(self, mapping):
         checked_at = now()
@@ -1028,7 +990,12 @@ except OSError as e:
             listener = probe(mapping["source_host"], mapping["bind_address"], mapping["source_port"])
             self._remember_probe(mapping_id, listener)
             details.append("来源监听：" + ("TCP 可连接。" if listener["ok"] else listener["message"]))
-            tunnel_ok = tunnel_ok and bool(listener["ok"])
+            # Some SSH servers allow -R while prohibiting direct-tcpip (-D).
+            # An unavailable diagnostic cannot revoke the real -R bind ACK.
+            confirmed_reverse = any(entry.get("kind") == "-R" and entry["process"].poll() is None
+                                    for entry in entries)
+            listener_ok = listener["ok"] or (listener.get("checked") is False and confirmed_reverse)
+            tunnel_ok = tunnel_ok and bool(listener_ok)
             if mapping.get("relay_port"):
                 relay = probe("local", "127.0.0.1", mapping["relay_port"])
                 details.append("本机中转端口：" + ("TCP 可连接。" if relay["ok"] else relay["message"]))

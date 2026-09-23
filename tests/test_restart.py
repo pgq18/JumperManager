@@ -1,7 +1,7 @@
 """Restart regressions: TIME_WAIT is reusable, active listeners stay protected.
 
-These tests execute the exact Python payload generated for a remote endpoint.
-They never connect over SSH or start/stop any saved mapping. Linux TIME_WAIT is
+These tests verify local socket policy. Remote listeners are acquired directly
+by SSH and covered by real-SSH integration checks. Linux TIME_WAIT is
 modeled explicitly; real socket tests use only ephemeral ports on this machine.
 """
 from __future__ import annotations
@@ -17,7 +17,7 @@ import types
 import unittest
 from unittest.mock import patch
 
-from jumper_manager.engine import Manager
+from jumper_manager.engine import Manager, local_socket_check
 
 
 class ReuseAwareSocket:
@@ -79,27 +79,18 @@ def fake_socket_module(instance):
 
 class RestartProbeTests(unittest.TestCase):
     def probe(self, *, operation="available", host_address="127.0.0.1", host_port=55289, fake=None):
-        # Construct no Manager runtime: _endpoint_check only needs these two
-        # substituted methods, avoiding config changes and monitor threads.
+        if fake is None:
+            return local_socket_check(operation, host_address, host_port)
+        with patch("jumper_manager.engine.socket", fake_socket_module(fake)), \
+             patch("jumper_manager.engine.os", types.SimpleNamespace(name="posix")):
+            return local_socket_check(operation, host_address, host_port)
+
+    def test_remote_bind_is_deferred_to_ssh_without_remote_command(self):
         manager = Manager.__new__(Manager)
-
-        def run(args, *, input=None, timeout=None):
-            self.assertEqual(args[-1], "python3 -")
-            self.assertIsInstance(input, str)
-            stdout = io.StringIO()
-            with redirect_stdout(stdout):
-                if fake is None:
-                    exec(compile(input, "<generated-remote-probe>", "exec"), {})
-                else:
-                    remote_os = types.ModuleType("os")
-                    remote_os.__dict__.update(vars(os))
-                    remote_os.name = "posix"
-                    with patch.dict(sys.modules, {"socket": fake_socket_module(fake), "os": remote_os}):
-                        exec(compile(input, "<generated-remote-probe>", "exec"), {})
-            return subprocess.CompletedProcess(args, 0, stdout.getvalue(), "")
-
-        with patch.object(manager, "_ssh_args", return_value=["ssh", "-T"]), patch.object(manager, "_run", side_effect=run):
-            return manager._endpoint_check("test-device", operation, host_address, host_port)
+        with patch.object(manager, "_run", side_effect=AssertionError("no remote helper")):
+            result = manager._endpoint_check("server-a", "available", "127.0.0.1", 50051)
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["checked"])
 
     def test_time_wait_reuse_can_bind_and_listen_then_releases_socket(self):
         probe_socket = ReuseAwareSocket("time_wait")

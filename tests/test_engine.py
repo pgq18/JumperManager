@@ -464,17 +464,13 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(live["failure_stage"], "start")
 
     def test_remote_probe_distinguishes_refused_connection_from_failed_diagnostic(self):
-        for output, error, expected in [
-                ('JM_RESULT:{"ok":false,"errno":111,"message":"Connection refused"}', "", True),
-                ("", "python3: command not found", False),
-                ("", "Permission denied (publickey)", False),
-                ("JM_RESULT:[]", "", False)]:
-            with self.subTest(output=output, error=error), \
-                 patch.object(self.manager, "_ssh_args", return_value=["ssh", "-T"]), \
-                 patch.object(self.manager, "_run", return_value=subprocess.CompletedProcess([], 1, output, error)):
-                result = self.manager._endpoint_check("server-b", "connect", "127.0.0.1", 50051)
-            self.assertFalse(result["ok"])
-            self.assertEqual(result["checked"], expected)
+        for result in [
+                {"ok": False, "checked": True, "message": "Connection refused"},
+                {"ok": False, "checked": False, "message": "SSH forwarding prohibited"}]:
+            with patch("jumper_manager.engine.ssh_tcp_check", return_value=result) as probe:
+                value = self.manager._endpoint_check("server-b", "connect", "127.0.0.1", 50051)
+            self.assertEqual(value, result)
+            self.assertEqual(probe.call_args.args[1:], ("server-b", "127.0.0.1", 50051))
 
     def test_ready_failure_still_cleans_every_started_ssh_leg(self):
         mapping = self.manager.create(payload())

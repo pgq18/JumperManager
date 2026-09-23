@@ -40,15 +40,17 @@ class TargetUsageTests(unittest.TestCase):
             self.assertIs(result["listening"], expected_listening)
             self.assertTrue(result["checked_at"])
 
-    def test_remote_marker_is_parsed_and_missing_helper_is_unknown(self):
+    def test_remote_shell_sampler_result_and_unavailable_shell_is_unknown(self):
         mapping = self.manager.create(payload())
-        output = 'JM_TARGET_PROCESSES:{"process_count":2,"listening":true,"complete":true,"message":"2 listeners"}'
-        with patch.object(self.manager, "_run", return_value=subprocess.CompletedProcess([], 0, output, "")) as run:
+        snapshot = {"process_count": 2, "listening": True, "complete": True, "message": "2 listeners"}
+        with patch.object(self.manager, "_run", return_value=subprocess.CompletedProcess([], 0, "framed snapshot", "")) as run, \
+             patch("jumper_manager.engine.parse_target_snapshot", return_value=snapshot) as parse:
             result = self.manager._sample_target_usage(mapping)
         self.assertEqual(result["process_count"], 2)
         self.assertTrue(result["complete"])
-        self.assertEqual(run.call_args.args[0][-2:], ["server-b", "python3 -"])
-        with patch.object(self.manager, "_run", return_value=subprocess.CompletedProcess([], 127, "", "python3 missing")):
+        self.assertEqual(run.call_args.args[0][-2:], ["server-b", "sh -s"])
+        parse.assert_called_once_with("framed snapshot", "127.0.0.1", 50051)
+        with patch.object(self.manager, "_run", return_value=subprocess.CompletedProcess([], 127, "", "shell unavailable")):
             result = self.manager._sample_target_usage(mapping)
         self.assertIsNone(result["process_count"])
         self.assertIsNone(result["listening"])

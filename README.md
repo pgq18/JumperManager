@@ -11,7 +11,7 @@ JumperManager 支持 Windows 桌面和 Linux 命令行，两个平台都可以�
 | Windows | Windows 10 / 11，64 位 |
 | Linux | 已实测 Ubuntu 24.04、x86_64；glibc 2.39 基线，其他发行版未作兼容承诺 |
 
-两个平台均提供独立程序，无需安装 Python。运行管理器的设备需要 OpenSSH 客户端；通过 SSH 检查的远端 Linux 设备仍需 Python 3。
+两个平台均提供独立程序，**运行管理器的设备和通过 SSH 连接的远端设备都无需安装 Python**。运行管理器的设备需要 OpenSSH 客户端，远端需要允许端口转发的 SSH 服务。
 
 ## Windows：下载与启动
 
@@ -55,7 +55,7 @@ JumperManager 使用你已经配置好的 SSH 连接。请先确认：
 
 - 运行管理器的设备已安装 OpenSSH 客户端。
 - 所需设备已配置 SSH 别名、登录密钥和必要的跳板，且本机能够登录。后台连接不能临时输入密码或确认主机身份；带口令的密钥需要先由 ssh-agent 解锁。
-- 远端 Linux 设备已安装 Python 3，用于检查端口。
+- 远端设备的 SSH 服务允许所需的端口转发。Linux 进程统计使用系统自带的工具；工具缺失或权限不足时，进程数量显示未知，不影响隧道启停。
 
 不熟悉 SSH 配置时，可以请设备管理员先完成这些准备。
 
@@ -128,6 +128,10 @@ Linux 没有托盘，使用 `./jumper-manager status` 查看状态，使用 `./j
 每次发布还提供 [SHA256SUMS.txt](https://github.com/pgq18/JumperManager/releases/latest/download/SHA256SUMS.txt)，用于核对下载文件。
 
 ## 常见问题
+
+**远端没有 Python，也不能安装软件，能使用吗？**
+
+可以。建立、停止映射和检查端口不依赖远端 Python，也不会在远端安装程序。只要已有 SSH 连接允许所需的端口转发，就可以建立映射。目标进程数量使用远端 Linux 的系统信息统计；如果工具或权限不足，会显示未知，不会因此关闭映射。具体检查条件见 [Linux 使用说明](docs/LINUX.md#保存配置升级和排查)。
 
 **设备列表没有我要的设备？**
 

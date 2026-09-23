@@ -1,19 +1,19 @@
 # Corresponding source
 
-JumperManager v1.2.0 is licensed under **AGPL-3.0-only**. The Windows and Linux
+JumperManager v1.2.1 is licensed under **AGPL-3.0-only**. The Windows and Linux
 executables in this release are built from the same application source at the
-`v1.2.0` tag:
+`v1.2.1` tag:
 
-https://github.com/pgq18/JumperManager/tree/v1.2.0
+https://github.com/pgq18/JumperManager/tree/v1.2.1
 
-The [v1.2.0 release](https://github.com/pgq18/JumperManager/releases/tag/v1.2.0)
+The [v1.2.1 release](https://github.com/pgq18/JumperManager/releases/tag/v1.2.1)
 provides these corresponding-source archives at no charge:
 
-- [JumperManager-Source-v1.2.0.zip](https://github.com/pgq18/JumperManager/releases/download/v1.2.0/JumperManager-Source-v1.2.0.zip):
+- [JumperManager-Source-v1.2.1.zip](https://github.com/pgq18/JumperManager/releases/download/v1.2.1/JumperManager-Source-v1.2.1.zip):
   the complete application source for both platforms, WebUI assets, tests,
   build scripts, pinned package requirements, license notices, and the matching
   pystray 0.19.5 and PyInstaller 6.22.3 source archives under `third-party-source/`.
-- [JumperManager-Linux-Source-v1.2.0.tar.gz](https://github.com/pgq18/JumperManager/releases/download/v1.2.0/JumperManager-Linux-Source-v1.2.0.tar.gz):
+- [JumperManager-Linux-Source-v1.2.1.tar.gz](https://github.com/pgq18/JumperManager/releases/download/v1.2.1/JumperManager-Linux-Source-v1.2.1.tar.gz):
   the same application source snapshot and build files, with the matching
   PyInstaller source archive for the Linux build.
 
@@ -21,6 +21,11 @@ The release's `SHA256SUMS.txt` identifies the downloadable archives. Each
 binary package also includes an executable checksum and a build record.
 Original upstream sources and their licenses are identified in
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+Both standalone programs include their own Python runtime. Remote SSH
+endpoints do not need Python: TCP checks use OpenSSH forwarding, and
+optional Linux process snapshots use a read-only shell helper with system
+tools and `/proc`. Nothing is installed on the remote endpoint.
 
 ## Rebuilding the Windows executable
 

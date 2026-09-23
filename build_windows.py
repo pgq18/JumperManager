@@ -25,7 +25,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parent
 REQUIREMENTS = ROOT / "requirements-build.txt"
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 RELEASE_EPOCH = str(int(datetime(2026, 9, 23, tzinfo=timezone.utc).timestamp()))
 
 
