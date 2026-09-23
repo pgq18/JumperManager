@@ -187,7 +187,7 @@ class Manager:
         self.safe_config = self.data / "ssh_runtime.conf"
         self.ssh = shutil.which("ssh")
         if not self.ssh:
-            raise RuntimeError("未找到 OpenSSH 客户端 ssh，请先安装 Windows OpenSSH Client。")
+            raise RuntimeError("未找到 OpenSSH 客户端 ssh。Windows 请安装 OpenSSH Client；Ubuntu 请安装 openssh-client。")
         self._lock = threading.RLock()
         self._refresh_lock = threading.RLock()
         self._mapping_locks: dict[str, threading.RLock] = {}
@@ -594,13 +594,21 @@ class Manager:
         if not runtime.exists():
             return
         try:
-            records = json.loads(runtime.read_text(encoding="utf-8")).get("processes", [])
-            for record in records:
+            value = json.loads(runtime.read_text(encoding="utf-8"))
+            if not isinstance(value, dict) or not isinstance(value.get("processes"), list):
+                raise ValueError("运行记录格式不正确。")
+            records = value["processes"]
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            self._recovery_warnings.append(f"旧运行记录无法读取：{exc}；保留原文件，未按进程名终止任何程序。")
+            return
+        for record in records:
+            try:
                 if not terminate_owned(record):
                     self._unrecovered_records.append(record)
-                    self._recovery_warnings.append(f"旧进程 {record.get('pid')} 身份不匹配，未操作；如端口冲突请人工检查。")
-        except (OSError, ValueError, KeyError, TypeError) as exc:
-            self._recovery_warnings.append(f"旧运行记录无法恢复：{exc}；未按进程名终止任何程序。")
+                    self._recovery_warnings.append(f"旧进程 {record.get('pid')} 身份或退出状态无法确认，已保留记录；如端口冲突请人工检查。")
+            except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
+                self._unrecovered_records.append(record)
+                self._recovery_warnings.append(f"旧进程清理未完成：{exc}；已保留所有权记录。")
         atomic_json(runtime, {"processes": self._unrecovered_records})
 
     def _save_runtime(self):
@@ -929,10 +937,12 @@ except OSError as e:
         for entry in reversed(entries):
             self._read_process_log(mapping_id, entry)
             try:
-                terminate_owned(entry["record"], entry["process"], entry["job"])
+                if not terminate_owned(entry["record"], entry["process"], entry["job"]):
+                    errors.append("无法确认旧进程或进程组已经退出，已保留所有权记录。")
+                    remaining.append(entry)
             except (OSError, subprocess.SubprocessError) as exc:
                 errors.append(str(exc))
-                if entry["process"].poll() is None:
+                if os.name != "nt" or entry["process"].poll() is None:
                     remaining.append(entry)
         with self._lock:
             if remaining:
@@ -1063,7 +1073,10 @@ except OSError as e:
                     failed = [entry for entry in entries if entry["process"].poll() is not None]
                     if failed:
                         message = "SSH 连接已断开：" + ", ".join(entry["alias"] for entry in failed) + "。已停止相关转发，可手动重新启动。"
-                        self._cleanup(mapping_id)
+                        try:
+                            self._cleanup(mapping_id)
+                        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+                            message += " 清理未完成：" + str(exc)
                         with self._lock:
                             mapping.update(status="error", error=message, usage=None, target_usage=None,
                                            health={"ok": False, "tunnel_ok": False, "target_ok": None,

@@ -17,12 +17,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 @contextmanager
-def loaded_app(*, frozen=False, executable=None):
+def loaded_app(*, frozen=False, executable=None, windows=True):
     """Load an independent entry point without launching its main function."""
     spec = importlib.util.spec_from_file_location("jumper_desktop_test_app", PROJECT_ROOT / "app.py")
     module = importlib.util.module_from_spec(spec)
     with patch.object(sys, "frozen", frozen, create=True), patch.object(sys, "executable", str(executable or sys.executable)):
         spec.loader.exec_module(module)
+        module.WINDOWS = windows
         # These entry-point tests do not change the test runner's DLL search
         # path or require the optional desktop dependencies to be installed.
         with patch.object(module, "prepare_frozen_runtime"):

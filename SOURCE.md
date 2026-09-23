@@ -1,16 +1,26 @@
 # Corresponding source
 
-JumperManager v1.1.6 is licensed under **AGPL-3.0-only**. The matching
-application source is the `v1.1.6` tag at:
+JumperManager v1.2.0 is licensed under **AGPL-3.0-only**. The Windows and Linux
+executables in this release are built from the same application source at the
+`v1.2.0` tag:
 
-https://github.com/pgq18/JumperManager/tree/v1.1.6
+https://github.com/pgq18/JumperManager/tree/v1.2.0
 
-The same release page as the Windows executable provides
-**JumperManager-Source-v1.1.6.zip** at no charge. This archive includes the
-application source, build scripts, pinned package requirements, license
-notices, and the matching pystray 0.19.5 and PyInstaller 6.22.3 source archives
-under `third-party-source/`. Original upstream sources are identified in
-`THIRD_PARTY_NOTICES.md`. These libraries retain their original licenses.
+The [v1.2.0 release](https://github.com/pgq18/JumperManager/releases/tag/v1.2.0)
+provides these corresponding-source archives at no charge:
+
+- [JumperManager-Source-v1.2.0.zip](https://github.com/pgq18/JumperManager/releases/download/v1.2.0/JumperManager-Source-v1.2.0.zip):
+  the complete application source for both platforms, WebUI assets, tests,
+  build scripts, pinned package requirements, license notices, and the matching
+  pystray 0.19.5 and PyInstaller 6.22.3 source archives under `third-party-source/`.
+- [JumperManager-Linux-Source-v1.2.0.tar.gz](https://github.com/pgq18/JumperManager/releases/download/v1.2.0/JumperManager-Linux-Source-v1.2.0.tar.gz):
+  the same application source snapshot and build files, with the matching
+  PyInstaller source archive for the Linux build.
+
+The release's `SHA256SUMS.txt` identifies the downloadable archives. Each
+binary package also includes an executable checksum and a build record.
+Original upstream sources and their licenses are identified in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## Rebuilding the Windows executable
 
@@ -40,3 +50,9 @@ The interpreter, Windows runtime and compiler/system libraries use their own
 licenses. Build on a supported Windows toolchain. Review the bundled native
 libraries and update their license notices when using a different interpreter
 or dependency version.
+
+## Rebuilding or running on Linux
+
+See [SOURCE-LINUX.md](SOURCE-LINUX.md) for the Linux build environment,
+standalone executable build, and optional source execution. Linux installation
+and everyday commands are covered in [docs/LINUX.md](docs/LINUX.md).

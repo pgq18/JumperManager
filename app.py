@@ -20,6 +20,7 @@ import webbrowser
 
 BUNDLE_ROOT = Path(__file__).resolve().parent
 FROZEN = bool(getattr(sys, "frozen", False))
+WINDOWS = os.name == "nt"
 # Bundled web assets live in PyInstaller's extraction directory. Persistent
 # mappings stay beside the EXE and must never be written into that directory.
 ROOT = Path(sys.executable).resolve().parent if FROZEN else BUNDLE_ROOT
@@ -62,11 +63,11 @@ class InstanceLock:
             self.file = None
 
 
-def request(url, body=None, token=None, timeout=3):
+def request(url, body=None, token=None, timeout=3, method=None):
     headers = {"Content-Type": "application/json"}
     if token:
         headers["X-Jumper-Token"] = token
-    req = Request(url, data=json.dumps(body).encode() if body is not None else None, headers=headers)
+    req = Request(url, data=json.dumps(body).encode() if body is not None else None, headers=headers, method=method)
     with OPENER.open(req, timeout=timeout) as response:
         return json.load(response)
 
@@ -120,7 +121,7 @@ def autostart_command(args):
     if FROZEN:
         command = [str(executable)]
     else:
-        if executable.with_name("pythonw.exe").exists():
+        if WINDOWS and executable.with_name("pythonw.exe").exists():
             executable = executable.with_name("pythonw.exe")
         command = [str(executable), str(BUNDLE_ROOT / "app.py"), "--serve"]
     command += ["--tray", "--no-browser", "--port", str(args.port)]
@@ -133,8 +134,10 @@ def serve(args):
     from jumper_manager.engine import Manager
     from jumper_manager.server import AppServer
 
+    if not WINDOWS:
+        os.umask(0o077)
     configure_logging()
-    identity = {"app": "JumperManager", "instance_id": secrets.token_hex(16), "pid": os.getpid(), "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "desktop": FROZEN, "tray_ready": False}
+    identity = {"app": "JumperManager", "instance_id": secrets.token_hex(16), "pid": os.getpid(), "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "desktop": FROZEN and WINDOWS, "tray_ready": False}
     # Lock and bind before constructing Manager; another launch must never
     # recover or clean up the first instance's tunnels.
     server = None
@@ -163,7 +166,7 @@ def serve(args):
             tray.start()
             identity["tray_ready"] = True
 
-        runtime = {**identity, "port": server.server_address[1]}
+        runtime = {**identity, "port": server.server_address[1], "ssh_config": str(Path(args.ssh_config).expanduser().resolve()) if args.ssh_config else None}
         temporary = RUNTIME.with_suffix(".tmp")
         temporary.write_text(json.dumps(runtime, ensure_ascii=False, indent=2), encoding="utf-8")
         temporary.replace(RUNTIME)
@@ -221,7 +224,7 @@ def launch(args):
         if not args.no_browser:
             webbrowser.open(existing["url"])
         return 0
-    if FROZEN:
+    if FROZEN and WINDOWS:
         # A windowed EXE already has no terminal; keep one serving process with
         # a tray rather than spawning another copy as though it were Python.
         args.open_browser = not args.no_browser
@@ -238,13 +241,32 @@ def launch(args):
                 time.sleep(0.2)
             raise
         return 0
+    service = linux_service()
+    if service is not None and service.is_enabled():
+        saved = service.settings()
+        if getattr(args, "port_explicit", False) and str(args.port) != saved[saved.index("--port") + 1]:
+            raise RuntimeError("自启服务使用其他端口，请先用 autostart enable --port 更新设置。")
+        if args.ssh_config:
+            config = str(Path(args.ssh_config).expanduser().resolve())
+            if "--ssh-config" not in saved or config != saved[saved.index("--ssh-config") + 1]:
+                raise RuntimeError("请先用 autostart enable --ssh-config 更新自启服务配置。")
+        service.start()
+        for _ in range(100):
+            active = running()
+            if active:
+                print("JumperManager 已启动：" + active["url"])
+                if not args.no_browser:
+                    webbrowser.open(active["url"])
+                return 0
+            time.sleep(0.2)
+        raise RuntimeError("服务未就绪，请查看 data/server.log 或 journalctl --user -u " + service.name)
     DATA.mkdir(parents=True, exist_ok=True)
     executable = Path(sys.executable)
-    if os.name == "nt" and executable.with_name("pythonw.exe").exists():
+    if WINDOWS and not FROZEN and executable.with_name("pythonw.exe").exists():
         executable = executable.with_name("pythonw.exe")
-    command = [str(executable), str(ROOT / "app.py"), "--serve", "--port", str(args.port)]
+    command = ([str(executable)] if FROZEN else [str(executable), str(BUNDLE_ROOT / "app.py")]) + ["--serve", "--port", str(args.port)]
     if args.ssh_config:
-        command += ["--ssh-config", str(Path(args.ssh_config).resolve())]
+        command += ["--ssh-config", str(Path(args.ssh_config).expanduser().resolve())]
     if getattr(args, "tray", False):
         command.append("--tray")
     kwargs = {"cwd": str(ROOT), "stdin": subprocess.DEVNULL}
@@ -252,6 +274,10 @@ def launch(args):
         kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
     else:
         kwargs["start_new_session"] = True
+    if FROZEN and not WINDOWS:
+        # The detached service must own its extraction directory after this
+        # short-lived CLI invocation exits (PyInstaller onefile protocol).
+        kwargs["env"] = {**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"}
     with (DATA / "launcher.log").open("ab") as log:
         process = subprocess.Popen(command, stdout=log, stderr=log, **kwargs)
     for _ in range(100):
@@ -269,46 +295,135 @@ def launch(args):
     return 1
 
 
+def linux_service():
+    if WINDOWS or not sys.platform.startswith("linux"):
+        return None
+    from jumper_manager.linux_service import LinuxUserService
+    return LinuxUserService(ROOT)
+
+
+def service_command(args):
+    command = [str(Path(sys.executable).resolve())]
+    if not FROZEN:
+        command.append(str(BUNDLE_ROOT / "app.py"))
+    command += ["--serve", "--no-tray", "--no-browser", "--port", str(args.port)]
+    if args.ssh_config:
+        command += ["--ssh-config", str(Path(args.ssh_config).expanduser().resolve())]
+    return command
+
+
+def stop_background():
+    active = running()
+    service = linux_service()
+    if service is not None and service.is_active():
+        service.stop()
+    elif active:
+        token = request(active["url"] + "/api/session")["token"]
+        request(active["url"] + "/api/shutdown", {}, token)
+    else:
+        print("JumperManager 未启动。")
+        return 0
+    for _ in range(120):
+        if not RUNTIME.exists():
+            print("JumperManager 已停止。")
+            return 0
+        time.sleep(0.25)
+    print("已请求停止，但资源仍在清理，请稍后运行 status 查看。", file=sys.stderr)
+    return 1
+
+
 def main():
     if sys.stdout is not None and hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     if sys.stderr is not None and hasattr(sys.stderr, "reconfigure"):
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-    parser = argparse.ArgumentParser(description="JumperManager - local SSH port mapping WebUI")
+    if FROZEN and not WINDOWS:
+        # Restore the system loader path for ssh/systemctl child processes.
+        # The current bundled interpreter is already loaded by the bootloader.
+        original = os.environ.get("LD_LIBRARY_PATH_ORIG")
+        if original is None:
+            os.environ.pop("LD_LIBRARY_PATH", None)
+        else:
+            os.environ["LD_LIBRARY_PATH"] = original
+    arguments = sys.argv[1:]
+    if arguments and arguments[0] == "--json" and len(arguments) > 1:
+        arguments = arguments[1:] + ["--json"]
+    if arguments and arguments[0] == "list":
+        arguments = ["mappings", "list", *arguments[1:]]
+    if arguments and arguments[0] in {"hosts", "mappings", "logs"}:
+        from jumper_manager.cli import run
+        return run(arguments, running=running, request=request, data=DATA)
+    if arguments and arguments[0] == "autostart":
+        from jumper_manager.linux_service import run
+        return run(arguments[1:], root=ROOT, command_builder=service_command)
+    parser = argparse.ArgumentParser(description="JumperManager - SSH 端口映射管理器", allow_abbrev=False,
+        epilog="list 查看所有映射；start/stop 名称或ID 控制单条映射，不带名称时控制管理器。更多命令：hosts / mappings / logs / autostart。")
+    parser.add_argument("command", nargs="?", choices=["list", "start", "stop", "restart", "status", "serve", "open"], help="启动、停止、重启、状态、前台运行或打开 WebUI")
+    parser.add_argument("tunnel", nargs="?", metavar="TUNNEL", help="start/stop 的映射名称、完整 ID 或唯一 ID 前缀；省略时控制管理器")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--serve", action="store_true", help="Run server in foreground")
-    mode.add_argument("--launch", action="store_true", help="Start server in background (default)")
+    mode.add_argument("--launch", "--start", action="store_true", help="Start server in background (default)")
     mode.add_argument("--status", action="store_true", help="Check background server")
     mode.add_argument("--stop", action="store_true", help="Stop server and its managed mappings")
+    mode.add_argument("--restart", action="store_true", help="Restart background server")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--ssh-config", help="Use a different SSH config file")
     parser.add_argument("--no-browser", action="store_true")
     parser.add_argument("--open", dest="open_browser", action="store_true")
+    parser.add_argument("--json", action="store_true", help="Machine-readable status")
+    from jumper_manager import __version__
+    parser.add_argument("--version", action="version", version="JumperManager " + __version__)
     tray_mode = parser.add_mutually_exclusive_group()
     tray_mode.add_argument("--tray", action="store_true", help="Show a Windows notification-area icon")
     tray_mode.add_argument("--no-tray", dest="tray", action="store_false", help="Run without a tray icon")
-    parser.set_defaults(tray=FROZEN)
-    args = parser.parse_args()
+    parser.set_defaults(tray=FROZEN and WINDOWS)
+    args = parser.parse_args(arguments)
+    if args.command and any((args.serve, args.launch, args.status, args.stop, args.restart)):
+        parser.error("请只指定一种启动或停止操作。")
+    if args.tunnel is not None:
+        if args.command not in {"start", "stop"}:
+            parser.error("只有 start/stop 支持指定单条映射。")
+        before_literal = arguments[:arguments.index("--")] if "--" in arguments else arguments
+        server_options = {"--port", "--ssh-config", "--no-browser", "--open", "--tray", "--no-tray"}
+        if any(value.split("=", 1)[0] in server_options for value in before_literal):
+            parser.error("单条映射的 start/stop 仅接受名称或 ID 和 --json；管理器启动参数请单独使用。")
+        from jumper_manager.cli import run
+        selection = (["--"] if args.tunnel.startswith("-") else []) + [args.tunnel]
+        forwarded = (["--json"] if args.json else []) + ["mappings", args.command, *selection]
+        return run(forwarded, running=running, request=request, data=DATA)
+    if args.command:
+        setattr(args, {"start": "launch", "open": "launch"}.get(args.command, args.command), True)
+        if args.command == "open":
+            args.open_browser = True
+    args.port_explicit = any(value == "--port" or value.startswith("--port=") for value in arguments)
     if not 1 <= args.port <= 65535:
         parser.error("--port must be between 1 and 65535")
+    if not WINDOWS:
+        if args.tray:
+            parser.error("Linux 使用命令行和 WebUI，无需 --tray。")
+        args.no_browser = args.no_browser or not args.open_browser
+        if args.open_browser and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+            args.open_browser = False
+            args.no_browser = True
+            print("当前无图形桌面，请通过 SSH 端口转发在电脑浏览器中打开下方地址。")
     if args.status:
         active = running()
-        show_message("RUNNING: " + active["url"] if active else "STOPPED")
+        if args.json:
+            print(json.dumps({"running": bool(active), "url": active["url"] if active else None,
+                              "pid": active["pid"] if active else None}, ensure_ascii=False))
+        else:
+            show_message("已启动：" + active["url"] if active else "已停止")
         return 0 if active else 1
     if args.stop:
-        active = running()
-        if not active:
-            print("JumperManager is not running.")
-            return 0
-        token = request(active["url"] + "/api/session")["token"]
-        request(active["url"] + "/api/shutdown", {}, token)
-        for _ in range(100):
-            if not RUNTIME.exists():
-                print("JumperManager stopped.")
-                return 0
-            time.sleep(0.2)
-        print("Shutdown requested; cleanup is still in progress.")
-        return 0
+        return stop_background()
+    if args.restart:
+        previous = running()
+        if previous and not args.port_explicit:
+            args.port = previous["port"]
+        if previous and not args.ssh_config:
+            args.ssh_config = previous.get("ssh_config")
+        if stop_background():
+            return 1
     if args.serve:
         prepare_frozen_runtime()
         serve(args)

@@ -2,25 +2,58 @@
 
 **选好设备和端口，让程序帮你建立 SSH 端口映射。**
 
-JumperManager 是一款 Windows 桌面工具。它读取已有的 SSH 连接配置，识别设备与跳板关系，通过浏览器界面管理映射，并用拓扑图展示连接路径。设备之间无法直接连接时，可以由运行 JumperManager 的电脑中转。
+JumperManager 支持 Windows 桌面和 Linux 命令行，两个平台都可以通过 WebUI 管理映射。它读取已有的 SSH 连接配置，识别设备与跳板关系，并用拓扑图展示连接路径。设备之间无法直接连接时，可以由运行 JumperManager 的设备中转。
 
-[下载 Windows 版](https://github.com/pgq18/JumperManager/releases/latest)
+[下载 Windows 版](https://github.com/pgq18/JumperManager/releases/latest/download/JumperManager-Windows-x64.zip) · [下载 Linux 版](https://github.com/pgq18/JumperManager/releases/latest/download/JumperManager-Linux-x86_64.tar.gz) · [Linux 使用说明](docs/LINUX.md)
 
-## 下载与启动
+| 平台 | 运行环境 |
+| --- | --- |
+| Windows | Windows 10 / 11，64 位 |
+| Linux | 已实测 Ubuntu 24.04、x86_64；glibc 2.39 基线，其他发行版未作兼容承诺 |
+
+两个平台均提供独立程序，无需安装 Python。运行管理器的设备需要 OpenSSH 客户端；通过 SSH 检查的远端 Linux 设备仍需 Python 3。
+
+## Windows：下载与启动
 
 支持 **Windows 10 / 11，64 位**。无需安装 Python 或开发工具。
 
-1. 打开下载页面，在 **Assets** 中下载 **JumperManager-Windows-x64.zip** 压缩包，不要选择 Source code。
+1. 下载 **[JumperManager-Windows-x64.zip](https://github.com/pgq18/JumperManager/releases/latest/download/JumperManager-Windows-x64.zip)**，不要选择 Source code。
 2. 将压缩包**完整解压**到一个可以保存文件的文件夹。
 3. 双击 **JumperManager.exe**。程序会在后台运行，并打开管理界面。
 
 默认界面地址：[http://127.0.0.1:8765](http://127.0.0.1:8765)。右下角通知区域会出现青绿色托盘图标，也可能收在 **“显示隐藏的图标”** 中。
 
+## Linux：独立程序与命令行
+
+下载 **[JumperManager-Linux-x86_64.tar.gz](https://github.com/pgq18/JumperManager/releases/latest/download/JumperManager-Linux-x86_64.tar.gz)**，在压缩包所在目录执行：
+
+```sh
+tar -xzf JumperManager-Linux-x86_64.tar.gz -C "$HOME"
+cd ~/JumperManager
+chmod +x jumper-manager
+./jumper-manager start
+./jumper-manager status
+```
+
+后台启动后，可通过 CLI 管理设备和映射，也可打开 [http://127.0.0.1:8765](http://127.0.0.1:8765) 使用 WebUI。服务器没有桌面时，在自己的电脑上建立 SSH 转发，再用浏览器访问。安装、远程访问、命令示例与登录后自动启动设置见 [Linux 使用说明](docs/LINUX.md)。
+
+查看全部映射，以及启动、停止其中一条：
+
+```sh
+./jumper-manager list
+./jumper-manager start demo
+./jumper-manager stop demo
+```
+
+`demo` 替换为映射名称、完整 ID 或唯一 ID 前缀。名称包含空格时加引号；`list --json` 可输出 JSON。**带名称的 `stop demo` 只停止这一条映射；不带名称的 `stop` 会停止管理器及全部映射。** 原有 `mappings list/start/stop` 命令仍可使用。
+
+Linux 没有托盘，也不需要图形桌面。它读取的是**运行管理器的 Linux 用户**的 `~/.ssh/config`，不会自动复制 Windows 的 SSH 配置或密钥。
+
 ## 使用前准备
 
 JumperManager 使用你已经配置好的 SSH 连接。请先确认：
 
-- 本机已安装 Windows OpenSSH 客户端。
+- 运行管理器的设备已安装 OpenSSH 客户端。
 - 所需设备已配置 SSH 别名、登录密钥和必要的跳板，且本机能够登录。后台连接不能临时输入密码或确认主机身份；带口令的密钥需要先由 ssh-agent 解锁。
 - 远端 Linux 设备已安装 Python 3，用于检查端口。
 
@@ -67,7 +100,7 @@ JumperManager 使用你已经配置好的 SSH 连接。请先确认：
 
 修改 SSH 配置后，已经运行的映射会继续使用原来的连接；停止后重新启动，才能应用新配置。
 
-## 后台运行与自动启动
+## Windows 后台运行与自动启动
 
 **关闭浏览器不会停止映射。** 点击托盘图标，或右键选择 **“打开管理界面”**，即可重新打开页面。重复双击程序也会打开已有实例。
 
@@ -82,19 +115,23 @@ JumperManager 使用你已经配置好的 SSH 连接。请先确认：
 
 希望登录 Windows 后自动恢复某条映射时，需要同时开启这两个选项。再次点击托盘中的勾选项，即可关闭登录自启。
 
+Linux 没有托盘，使用 `./jumper-manager status` 查看状态，使用 `./jumper-manager stop` 停止管理器及其映射。Linux 的登录后自动启动使用 `systemd --user`，操作见 [Linux 使用说明](docs/LINUX.md#登录后自动启动)。
+
 ## 配置保存、升级与迁移
 
-映射配置和日志保存在 **JumperManager.exe 同目录的 `data` 文件夹**。关闭程序后，映射配置仍会保留。程序不会保存 SSH 密码或复制私钥。
+两个平台的映射配置和日志都保存在**可执行文件同目录的 `data` 文件夹**。关闭程序后，映射配置仍会保留。程序不会保存 SSH 密码或复制私钥。
 
-- **升级**：先退出程序，备份 `data` 文件夹，再用新版 EXE 替换旧版。
-- **移动或迁移**：一起复制 EXE 和 `data` 文件夹。换电脑后，还需要准备新电脑上的 SSH 配置与登录密钥。
-- **移动后继续使用登录自启**：在新位置启动程序，再重新勾选托盘中的“开机自启（登录后）”。
+- **升级**：先停止管理器，备份 `data`，再替换程序及随包文件。不要删除已有的 `data`。
+- **移动或迁移**：一起复制程序和 `data`。换设备后，还需要为新的运行用户准备 SSH 配置与登录密钥。
+- **移动后继续使用登录自启**：Windows 在新位置重新勾选托盘中的“开机自启（登录后）”；Linux 按 [Linux 使用说明](docs/LINUX.md#保存配置升级和排查) 更新用户服务。
+
+每次发布还提供 [SHA256SUMS.txt](https://github.com/pgq18/JumperManager/releases/latest/download/SHA256SUMS.txt)，用于核对下载文件。
 
 ## 常见问题
 
 **设备列表没有我要的设备？**
 
-确认连接已写入 Windows 的 SSH 配置，并有具体的设备别名。只保存在 MobaXterm 等软件中的会话不会自动导入。也可以查看“设备与路由”中的同步状态和错误提示。
+确认连接已写入**运行管理器的用户**的 SSH 配置，并有具体的设备别名：Windows 通常为 `%USERPROFILE%\.ssh\config`，Linux 通常为 `~/.ssh/config`。只保存在 MobaXterm 等软件中的会话不会自动导入。也可以查看“设备与路由”中的同步状态和错误提示。
 
 **提示端口被占用？**
 
@@ -116,10 +153,12 @@ JumperManager 使用你已经配置好的 SSH 连接。请先确认：
 
 当前版本的监听地址限于设备自身。请在所选“来源设备”上，通过 `127.0.0.1` 访问映射端口；管理界面也仅供本机访问。
 
-**界面关闭后找不到程序，或启动失败？**
+**Windows 界面关闭后找不到程序，或启动失败？**
 
 先检查任务栏右下角的隐藏图标，或再次双击 EXE。若出现启动错误提示，确认程序已经解压、所在文件夹可以写入，并查看提示中的日志目录。
 
 ## 开源协议
 
 本项目采用 **[AGPL-3.0-only](LICENSE)**（GNU Affero General Public License 第 3 版，仅限此版本）。你可以使用、修改和分发，也可以商用，但须遵守协议中的源码提供等义务；修改版本通过网络提供交互服务时，也须向交互用户提供对应源码。具体权利与义务以协议原文为准。
+
+对应源码与随包说明见 [SOURCE.md](SOURCE.md)；第三方组件保留各自许可证。

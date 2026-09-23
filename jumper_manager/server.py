@@ -6,6 +6,7 @@ import hmac
 import json
 import logging
 import mimetypes
+import os
 import secrets
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -18,7 +19,9 @@ MAX_BODY = 65536
 
 class AppServer(ThreadingHTTPServer):
     daemon_threads = True
-    allow_reuse_address = False
+    # POSIX needs SO_REUSEADDR to restart after accepted HTTP connections
+    # leave TIME_WAIT. It does not permit a second live listener without REUSEPORT.
+    allow_reuse_address = os.name != "nt"
 
     def __init__(self, address, manager, web_root: Path, identity: dict):
         self.manager = manager

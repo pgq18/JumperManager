@@ -255,8 +255,13 @@ class EngineTests(unittest.TestCase):
             # a manual check only refreshes its process/TCP diagnostics.
             healthy = self.manager.check(mapping["id"])
             self.assertIs(self.manager._relays[mapping["id"]], relay)
-            self.assertEqual(healthy["target_usage"]["process_count"], 1)
+            # Linux may expose the listener but not every process holding its
+            # socket (other UIDs, inherited descriptors, PID namespaces).
             self.assertTrue(healthy["target_usage"]["listening"])
+            if healthy["target_usage"]["complete"]:
+                self.assertEqual(healthy["target_usage"]["process_count"], 1)
+            else:
+                self.assertIsNone(healthy["target_usage"]["process_count"])
             self.assertNotIn("failure_stage", healthy)
             with socket.create_connection(("127.0.0.1", source_port), timeout=3) as client:
                 client.sendall(b"service-started-later")
@@ -564,6 +569,39 @@ class EngineTests(unittest.TestCase):
         with patch("jumper_manager.processes.identity", return_value={"created": "NEW", "image": "ssh.exe", "command": "ssh our-unique-log"}), patch("jumper_manager.processes.subprocess.run") as run:
             self.assertFalse(terminate_owned(record))
             run.assert_not_called()
+
+    def test_uncertain_cleanup_retains_record_even_if_leader_already_exited(self):
+        mapping = self.manager.create(payload())
+        process = MagicMock()
+        process.poll.return_value = 0
+        entry = {"process": process, "job": MagicMock(), "record": {"pid": 101},
+                 "alias": "server-a", "log": self.root / "missing", "offset": 0}
+        self.manager._processes[mapping["id"]] = [entry]
+        with patch("jumper_manager.engine.terminate_owned", return_value=False):
+            with self.assertRaisesRegex(RuntimeError, "无法停止"):
+                self.manager._cleanup(mapping["id"])
+        self.assertEqual(self.manager._processes[mapping["id"]], [entry])
+        self.assertEqual(json.loads((self.manager.data / "runtime.json").read_text())["processes"], [entry["record"]])
+        with patch("jumper_manager.engine.terminate_owned", return_value=True):
+            self.manager._cleanup(mapping["id"])
+
+    def test_recovery_failure_keeps_ownership_and_continues_other_records(self):
+        records = [{"pid": 101}, {"pid": 102}]
+        runtime = self.manager.data / "runtime.json"
+        runtime.write_text(json.dumps({"processes": records}))
+        with patch("jumper_manager.engine.terminate_owned", side_effect=[OSError("permission denied"), True]) as terminate:
+            self.manager._recover()
+        self.assertEqual(terminate.call_count, 2)
+        self.assertEqual(json.loads(runtime.read_text())["processes"], records[:1])
+        self.assertEqual(self.manager._unrecovered_records, records[:1])
+
+    def test_malformed_recovery_file_is_not_overwritten_as_empty(self):
+        runtime = self.manager.data / "runtime.json"
+        runtime.write_text("invalid JSON that needs manual inspection")
+        with patch("jumper_manager.engine.terminate_owned") as terminate:
+            self.manager._recover()
+            terminate.assert_not_called()
+        self.assertEqual(runtime.read_text(), "invalid JSON that needs manual inspection")
 
     def test_stopped_manager_rejects_create(self):
         self.manager.close()

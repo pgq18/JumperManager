@@ -34,7 +34,7 @@ class AppLifecycleTests(unittest.TestCase):
             (root / "web" / "index.html").write_text("test", encoding="utf-8")
             shutil.copyfile(ROOT / "app.py", root / "app.py")
             shutil.copyfile(ROOT / "jumper_manager" / "server.py", root / "jumper_manager" / "server.py")
-            (root / "jumper_manager" / "__init__.py").write_text("", encoding="utf-8")
+            (root / "jumper_manager" / "__init__.py").write_text("__version__ = 'test'\n", encoding="utf-8")
             (root / "jumper_manager" / "engine.py").write_text(
                 "class Manager:\n"
                 "    def __init__(self, root, config_path=None):\n"

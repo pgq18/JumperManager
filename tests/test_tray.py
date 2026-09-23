@@ -225,10 +225,14 @@ class TrayTests(unittest.TestCase):
 
         self.controller.on_exit = on_exit
         self.controller.start()
-        with self.assertLogs(tray.LOG, level="ERROR"):
+        with self.assertLogs(tray.LOG, level="ERROR") as logged:
             self.controller._request_exit()
             self.assertTrue(called.wait(1))
             wait_for(lambda: not self.controller._exit_requested.is_set())
+            # exit_service clears its flag before the dispatch wrapper logs the
+            # exception. Keep the capture active until that wrapper completes.
+            wait_for(lambda: any(record.getMessage() == "Tray action failed: exit"
+                                 for record in logged.records))
         self.assertTrue(self.controller._icon.menu.items[-1].enabled)
 
     def test_default_action_opens_browser_and_coalesces_double_click(self):

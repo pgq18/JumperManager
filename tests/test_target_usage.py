@@ -95,7 +95,11 @@ class TargetUsageTests(unittest.TestCase):
             self.assertEqual(result["status"], "running")
             self.assertIsNone(result["health"]["target_ok"])
             self.assertIsNone(result["error"])
-            self.assertEqual(result["target_usage"]["process_count"], 1)
+            self.assertTrue(result["target_usage"]["listening"])
+            if result["target_usage"]["complete"]:
+                self.assertEqual(result["target_usage"]["process_count"], 1)
+            else:
+                self.assertIsNone(result["target_usage"]["process_count"])
             self.assertEqual(result["usage"]["active_connections"], 0)
 
 

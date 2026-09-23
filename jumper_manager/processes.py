@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import signal
 import subprocess
+import time
 
 
 def hidden_options() -> dict:
@@ -22,10 +23,11 @@ def hidden_options() -> dict:
 def identity(pid: int) -> dict | None:
     if os.name != "nt":
         try:
-            stat = Path(f"/proc/{pid}/stat").read_text()
-            start = stat[stat.rfind(")") + 2:].split()[19]
+            stat = _linux_stat(pid)
+            boot_id = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
             command = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\x00", b" ").decode(errors="replace")
-            return {"created": start, "image": os.readlink(f"/proc/{pid}/exe"), "command": command}
+            return {"created": stat["created"], "boot_id": boot_id, "pgid": stat["pgid"],
+                    "session": stat["session"], "image": os.readlink(f"/proc/{pid}/exe"), "command": command}
         except (OSError, IndexError):
             return None
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -106,7 +108,125 @@ class WindowsJob:
             self.handle = None
 
 
+def _linux_stat(pid):
+    # comm can contain spaces and parentheses; fields after its final ')' start
+    # with state (field 3). starttime is field 22 and survives exec().
+    text = Path(f"/proc/{pid}/stat").read_text()
+    fields = text[text.rfind(")") + 2:].split()
+    return {"state": fields[0], "pgid": int(fields[2]), "session": int(fields[3]), "created": fields[19]}
+
+
+def _linux_group(pgid):
+    members = {}
+    complete = True
+    for path in Path("/proc").iterdir():
+        if not path.name.isdigit():
+            continue
+        try:
+            info = _linux_stat(int(path.name))
+            if info["pgid"] == pgid and info["state"] not in {"Z", "X", "x"}:
+                members[int(path.name)] = info
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError, IndexError):
+            complete = False
+    return members, complete
+
+
+def _linux_resources_gone(pid):
+    # Unreadable /proc identity is not proof of death. Signal 0 is read-only;
+    # a leaderless group can still contain a ProxyCommand descendant.
+    try:
+        members, complete = _linux_group(pid)
+        if members:
+            return False
+        try:
+            state = _linux_stat(pid)
+            if state["state"] not in {"Z", "X", "x"}:
+                return False
+        except FileNotFoundError:
+            pass
+        if complete:
+            return True
+    except (OSError, ValueError, IndexError):
+        pass
+    for probe in (os.kill, os.killpg):
+        try:
+            probe(pid, 0)
+            return False
+        except ProcessLookupError:
+            continue
+        except OSError:
+            return False
+    return True
+
+
+def _terminate_linux(record, process=None, job=None, *, grace=5, kill_grace=3):
+    pid = int(record["pid"])
+    current = identity(pid)
+    expected = record.get("identity") or {}
+    marker = record.get("marker", "")
+    verified = bool(current and expected.get("created") == current.get("created")
+                    and expected.get("boot_id") and expected.get("boot_id") == current.get("boot_id")
+                    and expected.get("image") == current.get("image")
+                    and marker and marker in current.get("command", ""))
+    if not verified:
+        if process is None or process.poll() is not None:
+            return _linux_resources_gone(pid) if current is None else False
+        # A live Popen child is owned even if /proc is restricted. Do not infer
+        # process-group ownership or act on saved PIDs from missing metadata.
+        process.terminate()
+        try:
+            process.wait(timeout=grace)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=kill_grace)
+        return _linux_resources_gone(pid)
+    if current.get("pgid") != pid or current.get("session") != pid:
+        return False  # Never send a signal into the caller's/shared group.
+    known, _ = _linux_group(pid)
+    # Recheck after enumeration, before sending the first group signal.
+    confirmed = identity(pid)
+    if not confirmed or any(confirmed.get(key) != current.get(key) for key in ("created", "boot_id", "image", "pgid", "session")):
+        return False
+    try:
+        os.killpg(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return _linux_resources_gone(pid)
+
+    def wait_for_group(timeout):
+        deadline = time.monotonic() + timeout
+        while True:
+            if process is not None:
+                process.poll()  # Reap our own leader; zombies hold no sockets.
+            members, complete = _linux_group(pid)
+            if not members and complete:
+                return members, True
+            if time.monotonic() >= deadline:
+                return members, False
+            time.sleep(0.05)
+
+    members, gone = wait_for_group(grace)
+    if gone:
+        return True
+    # The leader can exit while a proxy ignores SIGTERM. Only escalate when a
+    # member captured in the verified original group is still the same process.
+    if not any(member in known and value["created"] == known[member]["created"]
+               and value["session"] == pid for member, value in members.items()):
+        return False
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    _, gone = wait_for_group(kill_grace)
+    if not gone:
+        raise OSError("SSH 进程组尚未完全退出；已保留所有权记录。")
+    return True
+
+
 def terminate_owned(record: dict, process: subprocess.Popen | None = None, job: WindowsJob | None = None) -> bool:
+    if os.name != "nt":
+        return _terminate_linux(record, process, job)
     pid = int(record["pid"])
     current = identity(pid)
     expected = record.get("identity") or {}
@@ -130,11 +250,6 @@ def terminate_owned(record: dict, process: subprocess.Popen | None = None, job: 
         else:
             subprocess.run(["taskkill.exe", "/PID", str(pid), "/T", "/F"], stdin=subprocess.DEVNULL,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=8, **hidden_options())
-    else:
-        try:
-            os.killpg(pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
     if job:
         job.close()
     if process is not None:

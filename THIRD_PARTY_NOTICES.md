@@ -2,8 +2,11 @@
 
 JumperManager's own source code is licensed under **AGPL-3.0-only**. The
 third-party components below retain their own licenses and copyright notices.
-This document describes the Windows executable built with CPython 3.14.7,
-PyInstaller 6.22.3, pystray 0.19.5, Pillow 12.3.0, and six 1.17.0.
+The Windows inventory below describes the executable built with CPython 3.14.7,
+PyInstaller 6.22.3, pystray 0.19.5, Pillow 12.3.0, and six 1.17.0. The separate
+Linux section at the end describes the Linux executable from the same v1.2.0
+release. The Windows library versions and Windows-specific components do not
+apply to that binary.
 
 The accompanying `licenses/` directory contains the license texts. Keep this
 document and that directory with the executable when redistributing it.
@@ -110,4 +113,50 @@ application runtime components in the examined executable. If future builds
 include additional runtime files or native libraries, update this inventory
 and retain their corresponding notices.
 
-Matching application and dependency sources, together with rebuild instructions, are provided in `JumperManager-Source-v1.1.6.zip` on the [release page](https://github.com/pgq18/JumperManager/releases/tag/v1.1.6). See also [SOURCE.md](SOURCE.md).
+For the Windows release, matching application and dependency sources, together with rebuild instructions, are provided in `JumperManager-Source-v1.2.0.zip` on the [release page](https://github.com/pgq18/JumperManager/releases/tag/v1.2.0). The same archive also contains the Linux application and build files. See [SOURCE.md](SOURCE.md).
+
+## Linux executable
+
+The Linux standalone executable is built and tested on Ubuntu 24.04, x86_64,
+with glibc 2.39, CPython 3.12, and PyInstaller 6.22.3. Its exact interpreter and
+build-package versions are recorded in `jumper-manager.build.json`. Its matching
+v1.2.0 application source is provided in `JumperManager-Linux-Source-v1.2.0.tar.gz`,
+with the PyInstaller 6.22.3
+source archive under `third-party-source/`. See [SOURCE-LINUX.md](SOURCE-LINUX.md)
+for the binary/source pairing and Linux rebuild instructions.
+
+The Linux build excludes pystray, Pillow/PIL, and tkinter. It provides a CLI and
+WebUI without a notification-area icon or Python GUI dependencies. The Windows
+Pillow, Microsoft-runtime, and DLL inventories above are not part of the Linux
+component inventory.
+
+Inspection of the Linux executable's bundled archive identified these native
+runtime libraries, in addition to CPython's own `lib-dynload` extension modules:
+
+| Component | Bundled Linux library |
+| --- | --- |
+| CPython interpreter | `libpython3.12.so.1.0` |
+| bzip2 | `libbz2.so.1.0` |
+| OpenSSL | `libcrypto.so.3`, `libssl.so.3` |
+| Expat | `libexpat.so.1` |
+| libffi | `libffi.so.8` |
+| XZ / liblzma | `liblzma.so.5` |
+| zlib | `libz.so.1` |
+
+The corresponding Ubuntu package copyright and license notices are preserved
+under `licenses/linux/`. They cover the Linux interpreter and libraries actually
+bundled, including retained upstream and distribution notices. The applicable
+Apache-2.0 common license text accompanies the OpenSSL notices there. These
+files are separate from the Windows license inventory; Windows patch versions
+must not be used to identify the Linux libraries.
+
+The PyInstaller loader and bootloader retain the licenses and bootloader
+exception in `licenses/PyInstaller-COPYING.txt`; its separately licensed runtime
+hook terms are also retained there. PyInstaller and the other packages pinned
+in `requirements-build-linux.txt` are build dependencies; listing a build
+dependency does not imply that the complete package is embedded at runtime.
+
+glibc is a dependency supplied by the target Linux system and is not bundled
+in this executable. OpenSSH and systemd are invoked as system programs and are
+not included in the Linux archive. The user's installed system components
+retain their own notices and licenses.
