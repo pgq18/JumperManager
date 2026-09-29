@@ -4,7 +4,7 @@ JumperManager's own source code is licensed under **AGPL-3.0-only**. The
 third-party components below retain their own licenses and copyright notices.
 The Windows inventory below describes the executable built with CPython 3.14.7,
 PyInstaller 6.22.3, pystray 0.19.5, Pillow 12.3.0, and six 1.17.0. The separate
-Linux section at the end describes the Linux executable from the same v1.2.1
+Linux section at the end describes the Linux executable from the same v1.2.2
 release. The Windows library versions and Windows-specific components do not
 apply to that binary.
 
@@ -113,14 +113,14 @@ application runtime components in the examined executable. If future builds
 include additional runtime files or native libraries, update this inventory
 and retain their corresponding notices.
 
-For the Windows release, matching application and dependency sources, together with rebuild instructions, are provided in `JumperManager-Source-v1.2.1.zip` on the [release page](https://github.com/pgq18/JumperManager/releases/tag/v1.2.1). The same archive also contains the Linux application and build files. See [SOURCE.md](SOURCE.md).
+For the Windows release, matching application and dependency sources, together with rebuild instructions, are provided in `JumperManager-Source-v1.2.2.zip` on the [release page](https://github.com/pgq18/JumperManager/releases/tag/v1.2.2). The same archive also contains the Linux application and build files. See [SOURCE.md](SOURCE.md).
 
 ## Linux executable
 
 The Linux standalone executable is built and tested on Ubuntu 24.04, x86_64,
 with glibc 2.39, CPython 3.12, and PyInstaller 6.22.3. Its exact interpreter and
 build-package versions are recorded in `jumper-manager.build.json`. Its matching
-v1.2.1 application source is provided in `JumperManager-Linux-Source-v1.2.1.tar.gz`,
+v1.2.2 application source is provided in `JumperManager-Linux-Source-v1.2.2.tar.gz`,
 with the PyInstaller 6.22.3
 source archive under `third-party-source/`. See [SOURCE-LINUX.md](SOURCE-LINUX.md)
 for the binary/source pairing and Linux rebuild instructions.

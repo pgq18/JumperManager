@@ -1,3 +1,3 @@
 """JumperManager: SSH port mapping managed locally."""
 
-__version__ = "1.2.1"
+__version__ = "1.2.2"

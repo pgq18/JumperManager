@@ -94,10 +94,10 @@ class EngineTests(unittest.TestCase):
         self.refresh.start()
         self.manager = Manager(self.root, str(self.root / "config"))
         # These lifecycle tests never launch diagnostics on real SSH aliases.
-        self.snapshot = patch.object(self.manager, "_connection_snapshot", side_effect=lambda host, address, port:
+        self.snapshot = patch.object(self.manager, "_connection_snapshot", side_effect=lambda host, address, port, **kwargs:
                                      local_connections(address, port) if host == "local" else set())
         self.snapshot.start()
-        self.target_snapshot = patch.object(self.manager, "_target_process_snapshot", side_effect=lambda host, address, port:
+        self.target_snapshot = patch.object(self.manager, "_target_process_snapshot", side_effect=lambda host, address, port, **kwargs:
                                             local_target_processes(address, port) if host == "local" else
                                             {"process_count": 0, "listening": False, "complete": True, "message": "没有进程在用"})
         self.target_snapshot.start()
@@ -294,7 +294,7 @@ class EngineTests(unittest.TestCase):
             self.manager._processes[mapping_id] = list(entries)
             return entry
 
-        def probe(host, operation, address, port):
+        def probe(host, operation, address, port, **kwargs):
             if host == "server-b" and operation == "connect":
                 self.assertEqual(len(entries), 2, "Target health is checked only after both SSH legs exist")
                 if target_state["failure"]:
@@ -351,7 +351,7 @@ class EngineTests(unittest.TestCase):
                     entries.append(entry)
                     self.manager._processes[mapping_id] = list(entries)
                     return entry
-                def probe(host, operation, address, port):
+                def probe(host, operation, address, port, **kwargs):
                     if host == "server-b" and operation == "connect":
                         return target
                     return {"ok": True, "probe_peer": ["127.0.0.1", 40234]}

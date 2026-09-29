@@ -147,10 +147,10 @@ class UsageTests(unittest.TestCase):
         process.poll.return_value = None
         self.manager._processes[mapping["id"]] = [{"process": process, "alias": "server-a", "log": self.root / "missing", "offset": 0}]
         actions = []
-        def snapshot(*args):
+        def snapshot(*args, **kwargs):
             actions.append("snapshot")
             return {("127.0.0.1", 40002)}
-        def probe(host, operation, address, port):
+        def probe(host, operation, address, port, **kwargs):
             actions.append(host)
             return {"ok": host == "server-a", "message": "refused", "probe_peer": ["127.0.0.1", 40003]}
         with patch.object(self.manager, "_connection_snapshot", side_effect=snapshot), \

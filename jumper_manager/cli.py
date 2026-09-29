@@ -10,6 +10,9 @@ import sys
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
 
+MAPPING_FIELDS = ("name", "source_host", "source_port", "target_host", "target_port",
+                  "bind_address", "target_address", "auto_start", "ssh_timeout")
+
 
 class CommandError(Exception):
     def __init__(self, message, code=2):
@@ -42,6 +45,16 @@ def _tail_size(value):
     return number
 
 
+def _ssh_timeout(value):
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("SSH 连接等待时间必须是 5–600 秒的整数") from None
+    if not 5 <= number <= 600:
+        raise argparse.ArgumentTypeError("SSH 连接等待时间必须是 5–600 秒的整数")
+    return number
+
+
 def _mapping_flags(parser, *, required):
     parser.add_argument("--name", default=argparse.SUPPRESS, help="映射名称")
     for name in ("source", "target"):
@@ -52,6 +65,8 @@ def _mapping_flags(parser, *, required):
                             default=argparse.SUPPRESS, help=f"{label}端口")
     parser.add_argument("--bind-address", default=argparse.SUPPRESS, help="来源监听地址")
     parser.add_argument("--target-address", default=argparse.SUPPRESS, help="目标设备上的服务地址")
+    parser.add_argument("--ssh-timeout", type=_ssh_timeout, default=argparse.SUPPRESS,
+                        help="此映射的 SSH 连接等待时间，5–600 秒，默认 30 秒")
     startup = parser.add_mutually_exclusive_group()
     startup.add_argument("--auto-start", dest="auto_start", action="store_true",
                          default=argparse.SUPPRESS, help="管理器启动时自动启动此映射")
@@ -136,7 +151,7 @@ class Client:
         self.request = request
         self.token = None
 
-    def call(self, path, body=None, *, method=None):
+    def call(self, path, body=None, *, method=None, timeout=None):
         writing = body is not None or method in {"PUT", "DELETE", "POST"}
         if writing and self.token is None:
             session = self.request(self.base + "/api/session", timeout=10)
@@ -144,6 +159,8 @@ class Client:
             if not isinstance(self.token, str) or not self.token or not self.token.isascii():
                 raise CommandError("服务未返回有效的会话令牌，请重试。", 1)
         kwargs = {"timeout": 300 if writing else 10}
+        if timeout is not None:
+            kwargs["timeout"] = timeout
         if writing:
             kwargs.update(body={} if body is None else body, token=self.token)
         # The existing callback infers GET/POST from body. PUT/DELETE use the
@@ -197,9 +214,7 @@ def _mapping_path(mapping):
 
 
 def _payload(args):
-    fields = ("name", "source_host", "source_port", "target_host", "target_port",
-              "bind_address", "target_address", "auto_start")
-    return {field: getattr(args, field) for field in fields if hasattr(args, field)}
+    return {field: getattr(args, field) for field in MAPPING_FIELDS if hasattr(args, field)}
 
 
 def _execute(args, *, running, request, data):
@@ -252,12 +267,21 @@ def _execute(args, *, running, request, data):
     if args.action == "show":
         return mapping, "mapping", 0
     if args.action == "edit":
-        return client.call(path, _payload(args), method="PUT"), "mapping", 0
+        # PUT validates a complete configuration. Preserve settings omitted by
+        # this CLI edit without sending runtime state or list metadata back.
+        settings = {field: mapping[field] for field in MAPPING_FIELDS if field in mapping}
+        settings.update(_payload(args))
+        return client.call(path, settings, method="PUT"), "mapping", 0
     if args.action == "delete":
         return client.call(path, {}, method="DELETE"), "deleted", 0
     if args.action in {"pin", "unpin"}:
         return client.call(path + "/pin", {"pinned": args.action == "pin"}), "mapping", 0
-    result = client.call(path + "/" + args.action, {})
+    # Starting/checking can establish several SSH connections in sequence.
+    # Keep waiting for the server when a mapping allows a slow jump chain.
+    wait = mapping.get("ssh_timeout", 30)
+    wait = wait if type(wait) is int and 5 <= wait <= 600 else 30
+    budget = max(300, wait * 8 + 60) if args.action in {"start", "check"} else 300
+    result = client.call(path + "/" + args.action, {}, timeout=budget)
     if args.action == "check" and result.get("status") == "stopped":
         return result, "unchecked_mapping", 1
     ok = result.get("status") == "stopped" if args.action == "stop" else mapping_status(result) == "已启动"
@@ -301,6 +325,7 @@ def _print_human(result, kind):
         print(_text(f"{result.get('name', '未命名映射')} [{result.get('id', '?')}]  {mapping_status(result)}"))
         print(_text(f"{_endpoint(result, 'source')} → {_endpoint(result, 'target')}"))
         print(_text(f"入口监听地址：{result.get('bind_address', '127.0.0.1')}；目标服务地址：{result.get('target_address', '127.0.0.1')}"))
+        print(_text(f"SSH 连接等待时间：{result.get('ssh_timeout', 30)} 秒"))
         if kind == "unchecked_mapping":
             print("映射尚未启动，未执行检查；请先启动此映射。")
         print(process_summary(result))
@@ -336,6 +361,8 @@ def _http_message(error):
             return result["error"]
     except (OSError, ValueError, AttributeError):
         pass
+    finally:
+        error.close()
     return f"服务请求失败（HTTP {error.code}）。"
 
 

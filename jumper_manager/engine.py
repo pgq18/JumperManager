@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 from datetime import datetime, timezone
+import hashlib
 import ipaddress
 import json
 import os
@@ -25,15 +26,31 @@ from .processes import WindowsJob, hidden_options, identity, terminate_owned
 from .ssh_config import ALIAS_RE, discover_aliases, parse_effective_config, route_for, simple_proxy, configuration_signature
 
 VERSION = "1.0"
-CONNECT_TIMEOUT = 8
+DEFAULT_SSH_TIMEOUT = 30
+MIN_SSH_TIMEOUT = 5
+MAX_SSH_TIMEOUT = 600
+SSH_COMMAND_ALLOWANCE = 10
 CONFIG_POLL_INTERVAL = 2
 PROBE_EXCLUSION_SECONDS = 30
 SAFE_OPTIONS = ["BatchMode=yes", "PasswordAuthentication=no", "KbdInteractiveAuthentication=no",
                 "StrictHostKeyChecking=yes", "UpdateHostKeys=no", "ConnectionAttempts=1",
-                "ConnectTimeout=8", "ServerAliveInterval=15", "ServerAliveCountMax=3",
+                "ServerAliveInterval=15",
                 "ControlMaster=no", "ControlPath=none", "RequestTTY=no",
                 "ForkAfterAuthentication=no", "PermitLocalCommand=no", "RemoteCommand=none"]
-FIELDS = ("name", "source_host", "source_port", "target_host", "target_port", "bind_address", "target_address", "auto_start", "pinned")
+FIELDS = ("name", "source_host", "source_port", "target_host", "target_port", "bind_address", "target_address", "auto_start", "pinned", "ssh_timeout")
+
+
+def ssh_wait_seconds(value) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not MIN_SSH_TIMEOUT <= value <= MAX_SSH_TIMEOUT:
+        raise ValueError(f"SSH 连接等待时间必须是 {MIN_SSH_TIMEOUT} 到 {MAX_SSH_TIMEOUT} 秒的整数。")
+    return value
+
+
+def safe_options(timeout: int) -> list[str]:
+    # A slow jump host may authenticate before it accepts forwarding channels.
+    # Keepalive must not end that connection before its configured wait expires.
+    alive_count = max(3, (timeout + 14) // 15 + 1)
+    return [*SAFE_OPTIONS, f"ConnectTimeout={timeout}", f"ServerAliveCountMax={alive_count}"]
 
 
 def now() -> str:
@@ -187,6 +204,7 @@ class Manager:
         self.logs_dir.mkdir(exist_ok=True)
         self.config_path = Path(config_path).expanduser().resolve() if config_path else Path.home() / ".ssh" / "config"
         self.safe_config = self.data / "ssh_runtime.conf"
+        self._policy_timeouts = {DEFAULT_SSH_TIMEOUT}
         self.ssh = shutil.which("ssh")
         if not self.ssh:
             raise RuntimeError("未找到 OpenSSH 客户端 ssh。Windows 请安装 OpenSSH Client；Ubuntu 请安装 openssh-client。")
@@ -225,21 +243,34 @@ class Manager:
                                    errors="replace", **hidden_options())
         job = WindowsJob(process)
         try:
-            stdout, stderr = process.communicate(input=input, timeout=timeout)
-            return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
-        except subprocess.TimeoutExpired:
+            deadline = time.monotonic() + timeout
+            pending_input = input
+            while True:
+                if self._closed.is_set():
+                    raise RuntimeError("程序正在关闭，已取消 SSH 操作。")
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RuntimeError(f"SSH 操作超过 {timeout} 秒；请检查设备连接，或调大此映射的 SSH 连接等待时间。")
+                try:
+                    stdout, stderr = process.communicate(input=pending_input, timeout=min(.5, remaining))
+                    return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
+                except subprocess.TimeoutExpired:
+                    pending_input = None
+        except BaseException:
             job.close()
-            if process.poll() is None:
-                if os.name != "nt":
-                    import signal
-                    try:
-                        os.killpg(process.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                else:
-                    process.kill()
+            if os.name != "nt":
+                # A jump child can keep stdout/stderr open after the top-level
+                # SSH exits. Kill our session's group before polling/reaping
+                # that parent, otherwise communicate() can wait on the child.
+                import signal
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            elif process.poll() is None:
+                process.kill()
             process.communicate()
-            raise RuntimeError(f"SSH 操作超过 {timeout} 秒，请检查设备路由、密钥及 known_hosts。")
+            raise
         finally:
             job.close()
 
@@ -344,29 +375,78 @@ class Manager:
                 with self._lock:
                     self._discovery["error"] = str(exc)
 
-    def _write_safe_config(self, effective=None):
-        lines = ["# Generated non-secret execution policy; do not edit.", "Host *"]
-        lines += ["    " + option.replace("=", " ", 1) for option in SAFE_OPTIONS]
-        for alias, config in (self._effective if effective is None else effective).items():
-            parsed = simple_proxy(config.get("proxycommand", ["none"])[0])
-            if parsed and ALIAS_RE.fullmatch(alias):
-                # Force safe noninteractive policy on common ssh -W jump processes too.
-                options = parsed["options"]
-                args = [self.ssh, *sum((["-o", option] for option in SAFE_OPTIONS), [])]
-                if "-F" not in options:
-                    args += ["-F", str(self.safe_config)]
-                args += [*options, "-W", parsed["forward"], parsed["destination"]]
-                command = subprocess.list2cmdline(args) if os.name == "nt" else __import__("shlex").join(args)
-                lines += [f"Host {alias}", "    ProxyCommand " + command]
-        if self.config_path.exists():
-            escaped = str(self.config_path).replace("\\", "/").replace('"', '\\"')
-            lines += ["Host *", f'    Include "{escaped}"']
-        temporary = self.safe_config.with_suffix(".tmp")
-        temporary.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        os.replace(temporary, self.safe_config)
+    def _policy_path(self, timeout, config_path=None):
+        if config_path is None or config_path == self.config_path:
+            return self.safe_config if timeout == DEFAULT_SSH_TIMEOUT else self.data / f"ssh_runtime_{timeout}.conf"
+        suffix = hashlib.sha256(str(config_path).encode("utf-8")).hexdigest()[:16]
+        return self.data / f"ssh_runtime_{timeout}_{suffix}.conf"
 
-    def _ssh_args(self, alias: str, *, probe=False) -> list[str]:
-        args = [self.ssh, "-F", str(self.safe_config), "-T"]
+    def _write_safe_config(self, effective=None, *, timeouts=None):
+        # Different mappings never rewrite a shared timeout value while another
+        # SSH process is still reading its configuration (including jump SSHs).
+        effective = self._effective if effective is None else effective
+        for timeout in self._policy_timeouts if timeouts is None else timeouts:
+            built = set()
+            def write_policy(config_path, configs, extra_alias=None):
+                path = self._policy_path(timeout, config_path)
+                if path in built:
+                    return path
+                built.add(path)
+                if configs is None:
+                    # Preserve explicit `ssh -F alternate.conf -W ...` while
+                    # applying this mapping's policy to its nested jumps too.
+                    configs = {}
+                    def resolve(alias):
+                        if alias not in configs:
+                            result = self._run([self.ssh, "-F", str(config_path), "-G", alias], timeout=10)
+                            if result.returncode:
+                                raise RuntimeError(f"无法解析 SSH 跳板配置 {alias}：{result.stderr.strip()[-1000:]}")
+                            configs[alias] = parse_effective_config(result.stdout)
+                        return configs[alias]
+                    aliases = discover_aliases(config_path) if config_path != "none" else []
+                    for alias in dict.fromkeys([*aliases, *([extra_alias] if extra_alias else [])]):
+                        route_for(alias, resolve)
+                options = safe_options(timeout)
+                lines = ["# Generated non-secret execution policy; do not edit.", "Host *"]
+                lines += ["    " + option.replace("=", " ", 1) for option in options]
+                for alias, config in configs.items():
+                    parsed = simple_proxy(config.get("proxycommand", ["none"])[0])
+                    if parsed and ALIAS_RE.fullmatch(alias):
+                        proxy_options = list(parsed["options"])
+                        nested_path = path
+                        if "-F" in proxy_options:
+                            index = proxy_options.index("-F")
+                            original = proxy_options[index + 1]
+                            del proxy_options[index:index + 2]
+                            alternate = Path(original).expanduser().resolve() if original != "none" else "none"
+                            nested_path = write_policy(alternate, None, parsed["alias"])
+                        args = [self.ssh, *sum((["-o", option] for option in options), []),
+                                "-F", str(nested_path), *proxy_options,
+                                "-W", parsed["forward"], parsed["destination"]]
+                        command = subprocess.list2cmdline(args) if os.name == "nt" else __import__("shlex").join(args)
+                        lines += [f"Host {alias}", "    ProxyCommand " + command]
+                if config_path != "none" and config_path.exists():
+                    escaped = str(config_path).replace("\\", "/").replace('"', '\\"')
+                    lines += ["Host *", f'    Include "{escaped}"']
+                temporary = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
+                try:
+                    temporary.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                    os.replace(temporary, path)
+                finally:
+                    temporary.unlink(missing_ok=True)
+                return path
+            write_policy(self.config_path, effective)
+
+    def _ssh_args(self, alias: str, *, probe=False, ssh_timeout=DEFAULT_SSH_TIMEOUT) -> list[str]:
+        timeout = ssh_wait_seconds(ssh_timeout)
+        with self._lock:
+            path = self._policy_path(timeout)
+            if timeout not in self._policy_timeouts or not path.exists():
+                self._write_safe_config(timeouts=(timeout,))
+                self._policy_timeouts.add(timeout)
+        # ProxyJump inherits -F automatically; simple ProxyCommand above names
+        # the same timeout-specific file explicitly.
+        args = [self.ssh, "-F", str(path), "-T"]
         if probe:
             args += ["-o", "ClearAllForwardings=yes"]
         return args
@@ -386,6 +466,7 @@ class Manager:
             result[key] = value
         result["source_port"] = port(payload.get("source_port"))
         result["target_port"] = port(payload.get("target_port"))
+        result["ssh_timeout"] = ssh_wait_seconds(payload.get("ssh_timeout", DEFAULT_SSH_TIMEOUT))
         result["bind_address"] = address(payload.get("bind_address", "127.0.0.1"), bind=True)
         result["target_address"] = address(payload.get("target_address", "127.0.0.1"))
         auto = payload.get("auto_start", False)
@@ -464,6 +545,7 @@ class Manager:
                     # Keep removed SSH aliases visible so a refresh/edit can fix them.
                     mapping = {key: entry.get(key) for key in FIELDS}
                     mapping["pinned"] = pinned
+                    mapping["ssh_timeout"] = entry.get("ssh_timeout", DEFAULT_SSH_TIMEOUT)
                     mapping.update({"id": mapping_id, "status": "error", "route": [], "plan": {"route": [], "description": "配置需要修正", "warnings": [str(exc)], "steps": []},
                                     "error": str(exc), "health": None, "usage": None, "target_usage": None, "last_checked": None, "logs": []})
                 self._mappings[mapping_id] = mapping
@@ -514,6 +596,8 @@ class Manager:
             old = self._get(mapping_id)
             if old["status"] not in {"stopped", "error"} or self._processes.get(mapping_id) or mapping_id in self._relays:
                 raise ValueError("请先停止映射再修改。")
+            if isinstance(payload, dict) and "ssh_timeout" not in payload:
+                payload = {**payload, "ssh_timeout": old.get("ssh_timeout", DEFAULT_SSH_TIMEOUT)}
             value = self._validate(payload)
             # Editing connection settings must not reset list metadata omitted
             # by the form. Pin changes have their own endpoint and ordering rule.
@@ -624,7 +708,8 @@ class Manager:
         if alias == "local":
             return {"ok": True, "alias": alias, "message": "本机可用，无需 SSH。", "route": ["local"]}
         try:
-            result = self._run([*self._ssh_args(alias, probe=True), alias, "echo JUMPER_MANAGER_SSH_OK"], timeout=25)
+            result = self._run([*self._ssh_args(alias, probe=True), alias, "echo JUMPER_MANAGER_SSH_OK"],
+                               timeout=DEFAULT_SSH_TIMEOUT + SSH_COMMAND_ALLOWANCE)
             ok = result.returncode == 0 and "JUMPER_MANAGER_SSH_OK" in result.stdout
             return {"ok": ok, "alias": alias, "message": "SSH 登录成功（已验证主机密钥）。" if ok else self._diagnostic(result.stderr or result.stdout), "route": hosts[alias]["route"]}
         except RuntimeError as exc:
@@ -640,9 +725,11 @@ class Manager:
             hint = "SSH 密钥认证失败，请检查 SSH User、IdentityFile 和 ssh-agent。 "
         elif "Address already in use" in message or "remote port forwarding failed" in message:
             hint = "监听端口被占用或 SSH 服务禁止转发；本程序不会关闭其他程序的隧道。 "
+        elif "timed out" in message.lower() or "timeout" in message.lower():
+            hint = "SSH 连接等待超时，请检查设备和跳板机，或调大此映射的 SSH 连接等待时间。 "
         return hint + (message or "SSH 操作失败，未返回详细错误。")
 
-    def _endpoint_check(self, host, operation, host_address, host_port):
+    def _endpoint_check(self, host, operation, host_address, host_port, *, ssh_timeout=DEFAULT_SSH_TIMEOUT):
         if host == "local":
             return local_socket_check(operation, host_address, host_port)
         if operation == "available":
@@ -654,7 +741,8 @@ class Manager:
         if config.get("localforward") or config.get("remoteforward"):
             return {"ok": False, "checked": False, "message": "此 SSH 别名含有额外转发配置，无法单独检查目标端口。"}
         try:
-            return ssh_tcp_check(self._ssh_args(host), host, host_address, host_port)
+            return ssh_tcp_check(self._ssh_args(host, ssh_timeout=ssh_timeout), host, host_address, host_port,
+                                 timeout=ssh_timeout, cancel_event=self._closed)
         except (OSError, RuntimeError, ValueError) as exc:
             return {"ok": False, "checked": False, "message": str(exc)}
 
@@ -672,11 +760,11 @@ class Manager:
             except (ValueError, TypeError):
                 pass
 
-    def _connection_snapshot(self, host, host_address, host_port):
+    def _connection_snapshot(self, host, host_address, host_port, *, ssh_timeout=DEFAULT_SSH_TIMEOUT):
         if host == "local":
             return local_connections(host_address, host_port)
-        result = self._run([*self._ssh_args(host, probe=True), host, "sh -s"],
-                           input=remote_snapshot_script(host_address, host_port), timeout=25)
+        result = self._run([*self._ssh_args(host, probe=True, ssh_timeout=ssh_timeout), host, "sh -s"],
+                           input=remote_snapshot_script(host_address, host_port), timeout=ssh_timeout + SSH_COMMAND_ALLOWANCE)
         if result.returncode:
             raise RuntimeError(self._diagnostic(result.stderr or result.stdout))
         return parse_connection_snapshot(result.stdout, host_address, host_port)
@@ -684,7 +772,8 @@ class Manager:
     def _sample_usage(self, mapping_id, mapping):
         checked_at = now()
         try:
-            peers = self._connection_snapshot(mapping["source_host"], mapping["bind_address"], mapping["source_port"])
+            peers = self._connection_snapshot(mapping["source_host"], mapping["bind_address"], mapping["source_port"],
+                                               ssh_timeout=mapping.get("ssh_timeout", DEFAULT_SSH_TIMEOUT))
             current = time.monotonic()
             excluded = {peer: expiry for peer, expiry in self._probe_peers.get(mapping_id, {}).items()
                         if expiry > current and peer in peers}
@@ -699,11 +788,11 @@ class Manager:
             return {"active_connections": None, "in_use": None, "checked_at": checked_at,
                     "message": "无法获取入口连接快照：" + str(exc)}
 
-    def _target_process_snapshot(self, host, host_address, host_port):
+    def _target_process_snapshot(self, host, host_address, host_port, *, ssh_timeout=DEFAULT_SSH_TIMEOUT):
         if host == "local":
             return local_target_processes(host_address, host_port)
-        result = self._run([*self._ssh_args(host, probe=True), host, "sh -s"],
-                           input=remote_target_process_script(host_address, host_port), timeout=25)
+        result = self._run([*self._ssh_args(host, probe=True, ssh_timeout=ssh_timeout), host, "sh -s"],
+                           input=remote_target_process_script(host_address, host_port), timeout=ssh_timeout + SSH_COMMAND_ALLOWANCE)
         if result.returncode:
             raise RuntimeError(self._diagnostic(result.stderr or result.stdout))
         return parse_target_snapshot(result.stdout, host_address, host_port)
@@ -711,7 +800,8 @@ class Manager:
     def _sample_target_usage(self, mapping):
         checked_at = now()
         try:
-            value = self._target_process_snapshot(mapping["target_host"], mapping["target_address"], mapping["target_port"])
+            value = self._target_process_snapshot(mapping["target_host"], mapping["target_address"], mapping["target_port"],
+                                                  ssh_timeout=mapping.get("ssh_timeout", DEFAULT_SSH_TIMEOUT))
             if not isinstance(value, dict):
                 raise ValueError("目标进程检查返回无效结果。")
             count, listening, complete = value.get("process_count"), value.get("listening"), value.get("complete")
@@ -742,14 +832,16 @@ class Manager:
         # Own the file handle instead, so readiness and UI log readers can
         # observe it while SSH is running. -N opens no remote session; this
         # SetEnv value is only an immutable command-line ownership marker.
-        args = [*self._ssh_args(alias), "-v", "-N", "-o", "ExitOnForwardFailure=yes",
+        timeout = self._get(mapping_id).get("ssh_timeout", DEFAULT_SSH_TIMEOUT)
+        args = [*self._ssh_args(alias, ssh_timeout=timeout), "-v", "-N", "-o", "ExitOnForwardFailure=yes",
                 "-o", f"SetEnv=JUMPER_MANAGER_ID={marker}", kind, specification, alias]
         with log_path.open("xb", buffering=0) as log_stream:
             process = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                        stderr=log_stream, **hidden_options())
         job = WindowsJob(process)
         record = {"mapping_id": mapping_id, "pid": process.pid, "identity": identity(process.pid), "marker": marker}
-        entry = {"process": process, "job": job, "record": record, "log": log_path, "offset": 0, "kind": kind, "alias": alias}
+        entry = {"process": process, "job": job, "record": record, "log": log_path, "offset": 0, "kind": kind, "alias": alias,
+                 "ssh_timeout": timeout}
         with self._lock:
             self._processes.setdefault(mapping_id, []).append(entry)
         try:
@@ -776,7 +868,8 @@ class Manager:
             pass
 
     def _wait_ready(self, mapping_id, entry, listener_address=None, listener_port=None):
-        deadline = time.monotonic() + 25
+        timeout = entry.get("ssh_timeout", DEFAULT_SSH_TIMEOUT)
+        deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if self._closed.is_set():
                 raise RuntimeError("程序正在关闭，已取消启动。")
@@ -805,7 +898,7 @@ class Manager:
                     self._read_process_log(mapping_id, entry)
                     return
             time.sleep(0.15)
-        raise RuntimeError("SSH 未在 25 秒内确认端口转发成功，请查看日志。")
+        raise RuntimeError(f"SSH 连接未在 {timeout} 秒内完成，请检查设备和跳板机，或调大此映射的 SSH 连接等待时间。")
 
     def start(self, mapping_id):
         self._get(mapping_id)
@@ -975,7 +1068,8 @@ class Manager:
                 details.append("找不到本程序持有的转发进程。")
             def probe(host, host_address, host_port):
                 try:
-                    result = self._endpoint_check(host, "connect", host_address, host_port)
+                    result = self._endpoint_check(host, "connect", host_address, host_port,
+                                                  ssh_timeout=mapping.get("ssh_timeout", DEFAULT_SSH_TIMEOUT))
                     if not isinstance(result, dict) or not isinstance(result.get("ok"), bool):
                         raise ValueError("端口检查返回无效结果。")
                     if "checked" in result and not isinstance(result["checked"], bool):

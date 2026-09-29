@@ -136,6 +136,7 @@ ssh -N -L 8876:127.0.0.1:8876 manager-server
 | `./jumper-manager start demo` | 启动单条映射 |
 | `./jumper-manager stop demo` | 停止单条映射，保留配置 |
 | `./jumper-manager mappings edit demo --target-port 50053` | 修改目标端口；先停止映射 |
+| `./jumper-manager mappings edit demo --ssh-timeout 120` | 将这条映射的 SSH 连接等待时间设为 120 秒；先停止映射 |
 | `./jumper-manager mappings delete demo` | 删除映射配置；建议先停止并核对名称 |
 | `./jumper-manager mappings pin demo` | 置顶映射 |
 | `./jumper-manager mappings unpin demo` | 取消置顶 |
@@ -151,9 +152,12 @@ ssh -N -L 8876:127.0.0.1:8876 manager-server
 | `--target-host` / `--target-port` | 目标设备别名和服务端口 |
 | `--bind-address` | 来源监听地址，默认 `127.0.0.1`，也可选 `::1` |
 | `--target-address` | 相对于目标设备解析的服务地址，默认 `127.0.0.1` |
+| `--ssh-timeout` | 此映射的 SSH 连接等待时间，5–600 秒的整数，默认 30 秒；同样应用于跳板连接 |
 | `--auto-start` / `--no-auto-start` | 开启或关闭“管理器启动时自动建立此映射” |
 
 `add` 需要两端设备和端口，建议同时用 `--name` 设置便于识别的名称；`edit` 只传要修改的字段。编辑映射不会重置它的置顶状态。
+
+WebUI 的新建、编辑窗口中，展开“高级设置”也可以设置“SSH 连接等待时间（秒）”，两端设置同步保存。这个时间按每次 SSH 连接计算，启动或检查的总耗时可能更长；目标服务仍然可以在映射启动后再启动。
 
 要调整顺序，先用 `list` 查看现有映射，再向 `reorder` 提供**全部映射**，例如只有 `demo`、`metrics` 两条映射时：
 

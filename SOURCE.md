@@ -1,19 +1,19 @@
 # Corresponding source
 
-JumperManager v1.2.1 is licensed under **AGPL-3.0-only**. The Windows and Linux
+JumperManager v1.2.2 is licensed under **AGPL-3.0-only**. The Windows and Linux
 executables in this release are built from the same application source at the
-`v1.2.1` tag:
+`v1.2.2` tag:
 
-https://github.com/pgq18/JumperManager/tree/v1.2.1
+https://github.com/pgq18/JumperManager/tree/v1.2.2
 
-The [v1.2.1 release](https://github.com/pgq18/JumperManager/releases/tag/v1.2.1)
+The [v1.2.2 release](https://github.com/pgq18/JumperManager/releases/tag/v1.2.2)
 provides these corresponding-source archives at no charge:
 
-- [JumperManager-Source-v1.2.1.zip](https://github.com/pgq18/JumperManager/releases/download/v1.2.1/JumperManager-Source-v1.2.1.zip):
+- [JumperManager-Source-v1.2.2.zip](https://github.com/pgq18/JumperManager/releases/download/v1.2.2/JumperManager-Source-v1.2.2.zip):
   the complete application source for both platforms, WebUI assets, tests,
   build scripts, pinned package requirements, license notices, and the matching
   pystray 0.19.5 and PyInstaller 6.22.3 source archives under `third-party-source/`.
-- [JumperManager-Linux-Source-v1.2.1.tar.gz](https://github.com/pgq18/JumperManager/releases/download/v1.2.1/JumperManager-Linux-Source-v1.2.1.tar.gz):
+- [JumperManager-Linux-Source-v1.2.2.tar.gz](https://github.com/pgq18/JumperManager/releases/download/v1.2.2/JumperManager-Linux-Source-v1.2.2.tar.gz):
   the same application source snapshot and build files, with the matching
   PyInstaller source archive for the Linux build.
 

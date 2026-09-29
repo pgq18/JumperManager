@@ -13,7 +13,7 @@ from urllib.error import HTTPError
 from urllib.parse import urlsplit
 from urllib.request import ProxyHandler, Request, build_opener
 
-from jumper_manager.cli import CommandError, process_summary, resolve_mapping, run
+from jumper_manager.cli import CommandError, MAPPING_FIELDS, process_summary, resolve_mapping, run
 from jumper_manager.server import AppServer
 from support import temp_directory
 
@@ -124,7 +124,33 @@ class CLITests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("--source-host", stdout)
         self.assertIn("--no-auto-start", stdout)
+        self.assertIn("--ssh-timeout", stdout)
         self.assertEqual(stderr, "")
+
+    def test_ssh_timeout_edit_preserves_other_mapping_fields(self):
+        before = copy.deepcopy(self.api.mappings[0])
+        code, stdout, stderr = self.invoke(["mappings", "edit", "demo", "--ssh-timeout", "120", "--json"])
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(json.loads(stdout)["ssh_timeout"], 120)
+        self.assertEqual(self.api.mappings[0], {**before, "ssh_timeout": 120})
+        write = next(call for call in self.api.calls if call[0] == "PUT")
+        self.assertEqual(write[2], {**{key: before[key] for key in MAPPING_FIELDS if key in before}, "ssh_timeout": 120})
+
+    def test_invalid_ssh_timeout_never_contacts_service(self):
+        for value in ("4", "601", "1.5", "word", ""):
+            with self.subTest(value=value):
+                code, output, _ = self.invoke(["mappings", "edit", "demo", "--ssh-timeout", value, "--json"])
+                self.assertEqual(code, 2)
+                self.assertIn("5–600", json.loads(output)["error"])
+        self.assertEqual(self.api.calls, [])
+
+    def test_long_ssh_wait_extends_start_and_check_http_deadline(self):
+        self.api.mappings[0]["ssh_timeout"] = 600
+        for action in ("start", "check"):
+            with self.subTest(action=action):
+                code, _, stderr = self.invoke(["mappings", action, "demo"])
+                self.assertEqual(code, 0, stderr)
+                self.assertEqual(self.api.calls[-1][4], 4860)
 
     def test_stopped_service_returns_actionable_nonzero_error(self):
         code, stdout, stderr = self.invoke(["mappings", "list"], running=lambda: None)
@@ -168,11 +194,13 @@ class CLITests(unittest.TestCase):
             "name": "新映射", "source_host": "local", "source_port": 50052,
             "target_host": "device-a", "target_port": 50051, "auto_start": True}, "session-token"))
 
-    def test_edit_sends_only_explicit_fields_and_preserves_false(self):
+    def test_edit_changes_only_explicit_settings_and_preserves_false(self):
         self.api.mappings[0].update(auto_start=True, target_address="service.internal")
+        expected = {key: self.api.mappings[0][key] for key in MAPPING_FIELDS if key in self.api.mappings[0]}
+        expected["auto_start"] = False
         code, _, _ = self.invoke(["mappings", "edit", "demo", "--no-auto-start"])
         self.assertEqual(code, 0)
-        self.assertEqual(self.api.calls[-1][:4], ("PUT", "/api/mappings/abc111", {"auto_start": False}, "session-token"))
+        self.assertEqual(self.api.calls[-1][:4], ("PUT", "/api/mappings/abc111", expected, "session-token"))
         self.assertEqual(self.api.mappings[0]["target_address"], "service.internal")
 
     def test_empty_edit_and_invalid_ports_do_not_mutate(self):
@@ -343,13 +371,46 @@ class CLIHTTPTests(unittest.TestCase):
         return result, output.getvalue(), errors.getvalue()
 
     def test_real_http_put_delete_preserve_origin_and_require_fetched_token(self):
+        expected = {key: self.manager.mapping[key] for key in MAPPING_FIELDS if key in self.manager.mapping}
+        expected["name"] = "changed"
         code, output, _ = self.invoke(["mappings", "edit", "http-demo", "--name", "changed", "--json"])
         self.assertEqual(code, 0, output)
-        self.assertEqual(self.manager.calls[-1], ("update", "http123", {"name": "changed"}))
+        self.assertEqual(self.manager.calls[-1], ("update", "http123", expected))
         code, output, _ = self.invoke(["mappings", "delete", "http123", "--json"])
         self.assertEqual(code, 0, output)
         self.assertEqual(self.manager.calls[-1], ("delete", "http123"))
         self.assertEqual(self.seen_tokens, [self.server.token, self.server.token])
+
+    def test_single_setting_edits_through_http_and_real_manager(self):
+        from unittest.mock import patch
+        from jumper_manager.engine import Manager, FIELDS
+        from test_engine import fake_refresh, payload
+
+        with temp_directory() as directory, patch.object(Manager, "refresh_hosts", fake_refresh):
+            manager = Manager(Path(directory), str(Path(directory) / "config"))
+            try:
+                mapping = manager.create(payload(auto_start=True, pinned=True))
+                self.server.manager = manager
+                expected = {key: mapping[key] for key in FIELDS}
+                for flag, value, field, saved_value in (
+                    ("--ssh-timeout", "120", "ssh_timeout", 120),
+                    ("--target-port", "50052", "target_port", 50052),
+                    ("--name", "renamed", "name", "renamed"),
+                    ("--no-auto-start", None, "auto_start", False),
+                ):
+                    args = ["mappings", "edit", mapping["id"], flag]
+                    if value is not None:
+                        args.append(value)
+                    code, output, errors = self.invoke([*args, "--json"])
+                    self.assertEqual(code, 0, output + errors)
+                    expected[field] = saved_value
+                    result = json.loads(output)
+                    self.assertEqual({key: result[key] for key in FIELDS}, expected)
+                    persisted = json.loads((manager.data / "mappings.json").read_text(encoding="utf-8"))["mappings"][0]
+                    self.assertEqual({key: persisted[key] for key in FIELDS}, expected)
+            finally:
+                self.server.manager = self.manager
+                manager.close()
 
     def test_actual_api_rejects_wrong_token_without_changing_manager(self):
         def bad_session(url, **kwargs):

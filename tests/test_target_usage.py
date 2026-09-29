@@ -88,10 +88,10 @@ class TargetUsageTests(unittest.TestCase):
             mapping = self.manager.create(payload(source_host="local", target_host="local",
                                                   source_port=source_port, target_port=target_port))
             original = self.manager._endpoint_check
-            def probe(host, operation, address, port):
+            def probe(host, operation, address, port, **kwargs):
                 if operation == "connect" and port == target_port:
                     raise TypeError("malformed target diagnostic")
-                return original(host, operation, address, port)
+                return original(host, operation, address, port, **kwargs)
             with patch.object(self.manager, "_endpoint_check", side_effect=probe):
                 result = self.manager.start(mapping["id"])
             self.assertEqual(result["status"], "running")

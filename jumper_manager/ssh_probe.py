@@ -100,7 +100,7 @@ def _close_probe(process, job):
             time.sleep(.05)
 
 
-def ssh_tcp_check(ssh_args, alias, address, port, *, timeout=25):
+def ssh_tcp_check(ssh_args, alias, address, port, *, timeout=30, cancel_event=None):
     """Use a temporary loopback-only SOCKS listener, then remove it entirely."""
     with socket.socket() as reservation:
         reservation.bind(("127.0.0.1", 0))
@@ -118,6 +118,8 @@ def ssh_tcp_check(ssh_args, alias, address, port, *, timeout=25):
             job = WindowsJob(process)
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise OSError("程序正在关闭，已取消 SSH 端口检查。")
                 if process.poll() is not None:
                     break
                 try:
@@ -127,11 +129,13 @@ def ssh_tcp_check(ssh_args, alias, address, port, *, timeout=25):
                     continue
                 with stream:
                     connected = True
-                    result = socks_connect(stream, address, port, deadline=min(deadline, time.monotonic() + 5))
+                    # SSH may use its entire connection budget. Once the local
+                    # SOCKS listener is ready, allow a separate short TCP check.
+                    result = socks_connect(stream, address, port, deadline=time.monotonic() + 5)
                     if process.poll() is not None:
                         break
                     return result
-            raise OSError("SSH 端口检查未能在限定时间内完成。")
+            raise OSError(f"SSH 连接未在 {timeout} 秒内完成；可调大此映射的 SSH 连接等待时间。")
         except (OSError, ValueError) as exc:
             diagnostics.seek(0)
             details = diagnostics.read(16384).decode("utf-8", errors="replace").strip()[-1800:]

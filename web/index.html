@@ -26,7 +26,7 @@
       </nav>
       <div class="sidebar-note"><span class="tiny-label">HOW IT WORKS</span><div class="mini-flow"><span data-icon="server"></span><i></i><span class="mini-local" data-icon="laptop"></span><i></i><span data-icon="server"></span></div><strong>设备与端口，统一管理</strong><p>选择设备与端口，查看目标进程与映射状态。</p></div>
       <div class="sidebar-bottom">
-        <div class="service-state"><span class="status-dot" id="serviceDot"></span><span id="serviceText">正在连接服务</span><span class="version">v1.2.1</span></div>
+        <div class="service-state"><span class="status-dot" id="serviceDot"></span><span id="serviceText">正在连接服务</span><span class="version">v1.2.2</span></div>
         <div class="local-endpoint"><span id="serviceEndpoint">127.0.0.1:8765</span><span>仅本机访问</span></div>
         <button type="button" id="shutdownButton" class="quiet-button"><span data-icon="power"></span>关闭程序</button>
       </div>
@@ -79,7 +79,11 @@
     <div class="dialog-content">
       <label class="field"><span>映射名称 <em>便于识别</em></span><input id="formName" name="name" maxlength="120" placeholder="例如：访问远端推理服务" autocomplete="off"></label>
       <div class="endpoint-form-grid"><fieldset class="endpoint-fieldset"><legend><span class="step-number">01</span>访问入口</legend><p>在哪台设备上，通过哪个端口访问？</p><label class="field"><span>来源设备</span><select id="formSourceHost" name="source_host" required></select></label><label class="field"><span>监听端口</span><input id="formSourcePort" name="source_port" type="number" min="1" max="65535" required placeholder="50051" inputmode="numeric"></label></fieldset><div class="endpoint-arrow" data-icon="arrowRight"></div><fieldset class="endpoint-fieldset"><legend><span class="step-number">02</span>目标服务</legend><p>实际连接到哪台设备上的服务？</p><label class="field"><span>目标设备</span><select id="formTargetHost" name="target_host" required></select></label><label class="field"><span>服务端口</span><input id="formTargetPort" name="target_port" type="number" min="1" max="65535" required placeholder="50051" inputmode="numeric"></label></fieldset></div>
-      <details class="advanced-options"><summary><span data-icon="settings"></span>高级设置<span>服务地址与启动偏好</span></summary><div class="advanced-grid"><label class="field"><span>来源监听地址</span><select id="formBindAddress" name="bind_address"><option value="127.0.0.1">127.0.0.1 · IPv4 回环</option><option value="::1">::1 · IPv6 回环</option></select><small>仅供来源设备自身访问</small></label><label class="field"><span>目标服务地址</span><input id="formTargetAddress" name="target_address" value="127.0.0.1" required placeholder="127.0.0.1" autocomplete="off"><small>此地址相对于目标设备解析</small></label></div><label class="checkbox-field"><input id="formAutoStart" name="auto_start" type="checkbox"><span>打开管理器时自动启动此映射<small>在启动 JumperManager 时生效，不设置 Windows 开机自启。</small></span></label></details>
+      <details class="advanced-options"><summary><span data-icon="settings"></span>高级设置<span>服务地址、连接等待与启动偏好</span></summary><div class="advanced-grid">
+        <label class="field"><span>来源监听地址</span><select id="formBindAddress" name="bind_address"><option value="127.0.0.1">127.0.0.1 · IPv4 回环</option><option value="::1">::1 · IPv6 回环</option></select><small>仅供来源设备自身访问</small></label>
+        <label class="field"><span>目标服务地址</span><input id="formTargetAddress" name="target_address" value="127.0.0.1" required placeholder="127.0.0.1" autocomplete="off"><small>此地址相对于目标设备解析</small></label>
+        <label class="field ssh-timeout-field"><span>SSH 连接等待时间（秒）</span><input id="formSshTimeout" name="ssh_timeout" type="number" min="5" max="600" step="1" value="30" required inputmode="numeric" aria-describedby="sshTimeoutHelp"><small id="sshTimeoutHelp">5–600 秒，默认 30 秒。连接较慢时可增大，应用于本条映射及其跳板连接；目标服务可稍后启动。</small></label>
+      </div><label class="checkbox-field"><input id="formAutoStart" name="auto_start" type="checkbox"><span>打开管理器时自动启动此映射<small>在启动 JumperManager 时生效，不设置 Windows 开机自启。</small></span></label></details>
       <div id="formConfigNotice" class="form-config-notice" role="status" hidden></div><div id="formError" class="inline-error" role="alert" hidden></div><div id="previewPanel" class="preview-panel" hidden></div>
       <div class="dialog-hint"><span data-icon="info"></span><p>先预览映射，再保存。可先启动映射，之后再开启目标服务。</p></div>
     </div>

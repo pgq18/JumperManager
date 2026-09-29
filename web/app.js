@@ -481,6 +481,7 @@
     if (["unchecked", "unconfirmed"].includes(mappingStatus(mapping))) container.append(el("p", "mapping-notice", "点击“检查”更新映射与目标进程状态。"));
     container.append(kv("访问地址", addressLabel(mapping.bind_address || "127.0.0.1", mapping.source_port)));
     container.append(kv("目标地址", addressLabel(mapping.target_address || "127.0.0.1", mapping.target_port)));
+    container.append(kv("SSH 连接等待", `${mapping.ssh_timeout ?? 30} 秒`));
     const checkedAt = mapping.last_checked || mapping.health?.checked_at;
     container.append(el("p", "detail-check-time", checkedAt ? `上次检查 ${formatTime(checkedAt, true)}` : "尚未检查"));
     const usage = targetProcessSummary(mapping);
@@ -836,6 +837,7 @@
     populateHostSelect($("formTargetHost"), mapping?.target_host || state.data.hosts.find((h) => h.id !== "local")?.id || "local");
     $("formSourcePort").value = mapping?.source_port || "";
     $("formTargetPort").value = mapping?.target_port || "";
+    $("formSshTimeout").value = mapping?.ssh_timeout ?? 30;
     $("formBindAddress").value = mapping?.bind_address || "127.0.0.1";
     $("formTargetAddress").value = mapping?.target_address || "127.0.0.1";
     $("formAutoStart").checked = mapping?.auto_start === true;
@@ -857,6 +859,7 @@
     $("formName").value = `${hostLabel(sourceId)} → ${hostLabel(targetId)} · ${sourcePort} 示例`;
     $("formSourceHost").value = sourceId; $("formTargetHost").value = targetId;
     $("formSourcePort").value = sourcePort; $("formTargetPort").value = targetPort;
+    $("formSshTimeout").value = existing?.ssh_timeout ?? 30;
     $("formBindAddress").value = existing?.bind_address || "127.0.0.1";
     $("formTargetAddress").value = existing?.target_address || "127.0.0.1"; $("formAutoStart").checked = false;
     invalidatePreview(); $("formError").hidden = true; $("formConfigNotice").hidden = false;
@@ -865,10 +868,12 @@
   function formPayload() {
     const sourcePort = Number($("formSourcePort").value), targetPort = Number($("formTargetPort").value);
     if (!Number.isInteger(sourcePort) || sourcePort < 1 || sourcePort > 65535 || !Number.isInteger(targetPort) || targetPort < 1 || targetPort > 65535) throw new Error("监听端口和服务端口必须是 1–65535 之间的整数。");
+    const sshTimeout = Number($("formSshTimeout").value);
+    if (!Number.isInteger(sshTimeout) || sshTimeout < 5 || sshTimeout > 600) throw new Error("SSH 连接等待时间必须是 5–600 秒之间的整数。");
     const source = $("formSourceHost").value, target = $("formTargetHost").value, targetAddress = $("formTargetAddress").value.trim();
     if (!source || !target) throw new Error("请选择来源设备和目标设备。");
     if (!targetAddress) throw new Error("请填写目标设备上的服务地址。");
-    return { name: $("formName").value.trim() || `${hostLabel(source)} → ${hostLabel(target)} · ${sourcePort}`, source_host: source, source_port: sourcePort, target_host: target, target_port: targetPort, bind_address: $("formBindAddress").value, target_address: targetAddress, auto_start: $("formAutoStart").checked };
+    return { name: $("formName").value.trim() || `${hostLabel(source)} → ${hostLabel(target)} · ${sourcePort}`, source_host: source, source_port: sourcePort, target_host: target, target_port: targetPort, ssh_timeout: sshTimeout, bind_address: $("formBindAddress").value, target_address: targetAddress, auto_start: $("formAutoStart").checked };
   }
   function invalidatePreview() { state.previewKey = null; state.previewRequest++; $("saveMappingButton").disabled = true; $("previewPanel").hidden = true; }
   function showFormError(message) { $("formError").textContent = message; $("formError").hidden = false; }

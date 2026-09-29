@@ -1267,9 +1267,9 @@ h1 {
 }
 
 .status-badge.started {
-  color: var(--muted);
-  background: #8191a70a;
-  border-color: #8191a725;
+  color: #79cbb7;
+  background: #36d4b70d;
+  border-color: #36d4b733;
 }
 
 .mapping-order-hint {
@@ -2224,6 +2224,19 @@ h1 {
 .endpoint-arrow .icon {
   width: 19px;
   height: 19px;
+}
+
+.ssh-timeout-field {
+  grid-column: 1 / -1;
+}
+
+.ssh-timeout-field>input {
+  width: 160px;
+  max-width: 100%;
+}
+
+.ssh-timeout-field>small {
+  line-height: 1.7;
 }
 
 .advanced-options {

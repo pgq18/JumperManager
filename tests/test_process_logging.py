@@ -31,6 +31,7 @@ class ProcessLoggingTests(unittest.TestCase):
         self.manager._log = MagicMock()
         self.child_handles = []
         self.mapping_id = "f" * 32
+        self.manager._mappings = {self.mapping_id: {"ssh_timeout": 120}}
 
     def tearDown(self):
         for descriptor in self.child_handles:
