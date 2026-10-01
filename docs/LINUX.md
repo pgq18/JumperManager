@@ -15,7 +15,7 @@ ssh -V
 chmod +x jumper-manager
 ```
 
-包内的 `JumperManager/` 包含独立程序及许可证等文件，请完整保留。独立程序内已包含 Python 运行时和 WebUI，运行时无需另外放置 `app.py`、`web/` 或安装 Python 包。已有安装需要更新时，先按后面的升级步骤停止并备份。
+包内的 `JumperManager/` 包含独立程序及许可证等文件，请完整保留。独立程序内已包含 Python 运行时和 WebUI，运行时无需另外放置 `app.py`、`web/` 或安装 Python 包。已有安装需要更新时，见后面的[检查与安装更新](#检查与安装更新)。
 
 发布页同时提供 [SHA256SUMS.txt](https://github.com/pgq18/JumperManager/releases/latest/download/SHA256SUMS.txt)，可用于核对下载包。对应源码和重建说明见 [SOURCE-LINUX.md](../SOURCE-LINUX.md)。
 
@@ -53,6 +53,8 @@ ssh target-device
 | `./jumper-manager restart` | 停止后重新启动管理器 |
 | `./jumper-manager serve` | 在当前终端前台运行，适合排查启动问题 |
 | `./jumper-manager open` | 在有桌面的 Linux 环境中打开管理界面 |
+| `./jumper-manager update --check` | 检查最新正式版本，不安装 |
+| `./jumper-manager update` | 有新版本时下载并安装 |
 
 停止管理器会保留映射配置。重新启动管理器时，只有设置了“打开管理器时自动启动此映射”的映射会自动建立，其余需要手动启动。关闭浏览器不会停止后台管理器或映射。
 
@@ -227,9 +229,35 @@ source-device 的 127.0.0.1:50052
 
 `systemd --user` 的默认行为是随用户登录启动。**机器开机后无人登录也要运行**，需要管理员另外为该用户配置 linger，例如经管理员确认后执行 `sudo loginctl enable-linger "$USER"`。JumperManager 不会默认开启 linger，也不会自行提权。启用用户服务不代表它会继承交互式终端的 `ssh-agent` 环境，应在实际自动启动环境中验证 SSH 登录。
 
+## 检查与安装更新
+
+**以下更新命令从 1.2.3 起提供。** 1.2.2 或更早版本需要先手动升级一次：停止管理器并备份 `data/`，下载最新压缩包，替换程序及随包文件，保留原来的 `data/`，再重新启动。
+
+在独立程序所在目录执行：
+
+```sh
+# 仅检查当前版本和最新正式版本
+./jumper-manager update --check
+
+# 有新版本时下载并安装
+./jumper-manager update
+
+# 供脚本读取的 JSON 结果
+./jumper-manager update --check --json
+./jumper-manager update --json
+```
+
+`update` 会直接安装检测到的新版本，不再询问确认；只想查看版本时使用 `--check`。两种操作都不要求管理器事先启动。已经是最新版本时不会重新安装，也不会降级或安装预发布版本。
+
+更新包来自本项目的 GitHub Releases，下载完成后会核对 SHA-256。检查、下载和校验期间，现有映射继续运行；安装时需要短暂中断。完成后保留 `data/`、SSH 配置、映射顺序和自启设置，并恢复更新前已启动的映射。管理器原本停止时，更新后仍然停止。使用 `systemd --user` 管理的实例继续通过原用户服务启动。
+
+下载或校验失败不会停止现有管理器。安装失败时保留或恢复原程序；可根据命令输出查看原因并重试。更新需要安装目录可写，且当前用户能够访问 GitHub；使用代理时可在终端配置 `HTTPS_PROXY`。不要通过 `sudo` 更新另一位用户正在运行的实例。
+
+自动安装用于官方独立程序。通过源码启动的用户可以检查版本，需要按[源码说明](../SOURCE-LINUX.md)更新源码并重新构建。
+
 ## 保存配置、升级和排查
 
-配置与日志保存在可执行文件同目录的 `data/`，例如 `~/JumperManager/data/`。升级前先停止管理器并备份 `data/`，再替换程序及随包文件，保留原来的 `data/`，最后重新启动。不要用其他设备的数据目录直接覆盖仍在运行的实例。
+配置与日志保存在可执行文件同目录的 `data/`，例如 `~/JumperManager/data/`。推荐使用 `./jumper-manager update` 升级。手动升级时，先停止管理器并备份 `data/`，再替换程序及随包文件，保留原来的 `data/`，最后重新启动。不要用其他设备的数据目录直接覆盖仍在运行的实例。
 
 如果移动安装目录且曾开启登录后自动启动，先停止管理器，并在旧目录取消自动启动，再移动目录，在新位置重新启用，使用户服务引用正确的路径。
 

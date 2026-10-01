@@ -25,8 +25,8 @@ import sys
 
 ROOT = Path(__file__).resolve().parent
 REQUIREMENTS = ROOT / "requirements-build.txt"
-VERSION = "1.2.2"
-RELEASE_EPOCH = str(int(datetime(2026, 9, 29, tzinfo=timezone.utc).timestamp()))
+VERSION = "1.2.3"
+RELEASE_EPOCH = str(int(datetime(2026, 10, 1, tzinfo=timezone.utc).timestamp()))
 
 
 def pinned_requirements() -> dict[str, str]:

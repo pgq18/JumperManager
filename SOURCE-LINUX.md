@@ -1,27 +1,27 @@
 # Corresponding source for the Linux release
 
-JumperManager v1.2.2 is licensed under **AGPL-3.0-only**. The Linux standalone
+JumperManager v1.2.3 is licensed under **AGPL-3.0-only**. The Linux standalone
 executable is built from the same application source as the Windows release,
 including the Linux CLI, user-service integration, and build support. The
 matching source tag is
-[v1.2.2](https://github.com/pgq18/JumperManager/tree/v1.2.2).
+[v1.2.3](https://github.com/pgq18/JumperManager/tree/v1.2.3).
 
 ## Matching binary and source archives
 
-The [v1.2.2 release](https://github.com/pgq18/JumperManager/releases/tag/v1.2.2)
+The [v1.2.3 release](https://github.com/pgq18/JumperManager/releases/tag/v1.2.3)
 provides:
 
-- [JumperManager-Linux-x86_64.tar.gz](https://github.com/pgq18/JumperManager/releases/download/v1.2.2/JumperManager-Linux-x86_64.tar.gz):
+- [JumperManager-Linux-x86_64.tar.gz](https://github.com/pgq18/JumperManager/releases/download/v1.2.3/JumperManager-Linux-x86_64.tar.gz):
   the standalone executable, build record,
   checksum, and accompanying notices and license texts.
-- [JumperManager-Linux-Source-v1.2.2.tar.gz](https://github.com/pgq18/JumperManager/releases/download/v1.2.2/JumperManager-Linux-Source-v1.2.2.tar.gz):
+- [JumperManager-Linux-Source-v1.2.3.tar.gz](https://github.com/pgq18/JumperManager/releases/download/v1.2.3/JumperManager-Linux-Source-v1.2.3.tar.gz):
   the matching application source snapshot,
   WebUI assets, tests, build scripts, pinned Linux build requirements, and
   license notices. It also contains the PyInstaller 6.22.3 source archive under
   `third-party-source/`, including its loader and bootloader sources.
 - `SHA256SUMS.txt`: checksums of the release archives.
 
-The complete `JumperManager-Source-v1.2.2.zip` described in
+The complete `JumperManager-Source-v1.2.3.zip` described in
 [SOURCE.md](SOURCE.md) contains the same application snapshot and is also
 suitable for rebuilding Linux. Use the source archive matching the binary's
 release version. The
@@ -37,7 +37,7 @@ the bundled components separately from the Windows inventory.
 
 ## Rebuilding the standalone executable
 
-Extract `JumperManager-Linux-Source-v1.2.2.tar.gz` and work from its project root.
+Extract `JumperManager-Linux-Source-v1.2.3.tar.gz` and work from its project root.
 Use **Ubuntu 24.04, x86_64, glibc 2.39, and CPython 3.12** with a separate Linux
 build environment. This is the tested release baseline; compatibility with
 older glibc versions or other distributions is not established by this build.
@@ -94,11 +94,20 @@ forwarding. Optional remote Linux process snapshots use `sh`, `od`,
 address is a hostname. Missing tools or insufficient process visibility
 produce an unknown snapshot and do not prevent tunnel startup.
 
+The standalone program supports `./jumper-manager update --check` and
+`./jumper-manager update` for checking and installing the latest official
+stable Linux binary release. The updater verifies the downloaded archive's
+SHA-256, preserves `data/`, and restarts an active manager with its previously
+started mappings. See [docs/LINUX.md](docs/LINUX.md) for normal update usage.
+Source execution supports `update --check`; installation requires updating
+the source and rebuilding. An official binary update replaces local code
+modifications, so retain modified source before updating a custom build.
+
 ## Keeping the delivery together
 
 Keep `LICENSE`, `NOTICE`, `SOURCE-LINUX.md`, `THIRD_PARTY_NOTICES.md`, and the
 applicable `licenses/` files with the Linux executable, and provide access to
-the matching `JumperManager-Linux-Source-v1.2.2.tar.gz` alongside it. If rebuilding with
+the matching `JumperManager-Linux-Source-v1.2.3.tar.gz` alongside it. If rebuilding with
 different libraries, retain their notices and update the Linux component
 inventory for that new binary.
 

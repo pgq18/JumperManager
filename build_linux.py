@@ -24,7 +24,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parent
 REQUIREMENTS = ROOT / "requirements-build-linux.txt"
-SOURCE_DATE_EPOCH = str(int(datetime(2026, 9, 29, tzinfo=timezone.utc).timestamp()))
+SOURCE_DATE_EPOCH = str(int(datetime(2026, 10, 1, tzinfo=timezone.utc).timestamp()))
 PUBLIC_WEB_SUFFIXES = {".html", ".css", ".js", ".svg", ".png", ".jpg", ".jpeg",
                        ".ico", ".woff", ".woff2", ".webp", ".json"}
 PUBLIC_ASSET_SUFFIXES = {".svg", ".png", ".jpg", ".jpeg", ".ico", ".webp"}

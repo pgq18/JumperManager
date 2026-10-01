@@ -10,6 +10,17 @@ from test_cli import FakeAPI
 
 
 class LinuxEntryTests(unittest.TestCase):
+    def test_update_check_delegates_without_launching_manager(self):
+        with loaded_app(windows=False) as app, patch.object(app.sys, 'argv', ['jumper-manager', 'update', '--check', '--json']), patch('jumper_manager.updates.run', return_value=0) as run, patch.object(app, 'launch') as launch:
+            self.assertEqual(app.main(), 0)
+            self.assertEqual(run.call_args.args[0], ['--check', '--json'])
+            launch.assert_not_called()
+
+    def test_update_apply_is_only_available_in_frozen_helper(self):
+        with loaded_app(windows=False) as app, patch.object(app.sys, 'argv', ['app.py', '--apply-update', 'plan.json']):
+            with self.assertRaises(ValueError):
+                app.main()
+
     def test_frozen_linux_defaults_to_background_without_tray_or_browser(self):
         with loaded_app(frozen=True, windows=False) as app, patch.object(app.sys, 'argv', ['jumper-manager', 'start']), patch.object(app, 'launch', return_value=0) as launch:
             self.assertEqual(app.main(), 0)

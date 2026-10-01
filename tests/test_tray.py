@@ -327,6 +327,47 @@ class TrayTests(unittest.TestCase):
         item.action(None, None)
         self.assertIsNone(self.controller._autostart_thread)
 
+    def test_update_action_is_background_and_coalesces_clicks(self):
+        entered, release = threading.Event(), threading.Event()
+        calls = []
+
+        def update(progress):
+            calls.append(threading.get_ident())
+            progress("正在下载更新…")
+            entered.set()
+            release.wait(1)
+            return False
+
+        self.controller.on_check_update = update
+        self.controller.start()
+        item = self.controller._icon.menu.items[5]
+        self.assertEqual(item.text, "检查更新")
+        self.assertTrue(item.enabled)
+        try:
+            item.action(None, None)
+            self.assertTrue(entered.wait(1))
+            self.assertNotEqual(calls[0], threading.get_ident())
+            self.assertFalse(item.enabled)
+            self.assertEqual(item.text, "正在下载更新…")
+            item.action(None, None)
+            self.assertEqual(len(calls), 1)
+        finally:
+            release.set()
+        wait_for(lambda: item.enabled)
+        self.assertEqual(item.text, "检查更新")
+
+    def test_update_error_unblocks_menu(self):
+        def update(progress):
+            raise OSError("network down")
+
+        self.controller.on_check_update = update
+        self.controller.start()
+        with self.assertLogs(tray.LOG, level="ERROR"):
+            self.controller._check_update()
+            wait_for(lambda: bool(self.controller._icon.notifications))
+        wait_for(lambda: self.controller._update_available())
+        self.assertIn("network down", self.controller._icon.notifications[-1][0])
+
     def test_autostart_initial_and_external_states_are_read_without_writes(self):
         provider = FakeAutostart(True)
         self.controller.autostart = provider

@@ -77,6 +77,7 @@ class TrayController:
         self.get_status = get_status
         self.on_exit = on_exit
         self.autostart = None
+        self.on_check_update = None
         self._lock = threading.RLock()
         self._icon_lock = threading.RLock()
         self._autostart_io_lock = threading.Lock()
@@ -96,6 +97,8 @@ class TrayController:
         self._autostart_enabled = False
         self._autostart_error: str | None = None
         self._autostart_busy = False
+        self._update_busy = False
+        self._update_label = "检查更新"
 
     @property
     def is_running(self) -> bool:
@@ -124,6 +127,8 @@ class TrayController:
                         pystray.MenuItem(self._autostart_text, self._toggle_autostart,
                                          checked=self._autostart_checked,
                                          enabled=self._autostart_available),
+                        pystray.MenuItem(self._update_text, self._check_update,
+                                         enabled=self._update_available),
                         pystray.Menu.SEPARATOR,
                         pystray.MenuItem(self._exit_text, self._request_exit,
                                          enabled=lambda _item: not self._exit_requested.is_set()),
@@ -252,6 +257,43 @@ class TrayController:
                 return "开机自启（状态读取失败）"
             return "开机自启（登录后）"
 
+    def _update_text(self, _item=None):
+        with self._lock:
+            return self._update_label
+
+    def _update_available(self, _item=None):
+        with self._lock:
+            return (self.on_check_update is not None and not self._update_busy
+                    and not self._stopped.is_set() and not self._exit_requested.is_set())
+
+    def _update_progress(self, message):
+        with self._lock:
+            self._update_label = message
+        self._update_display()
+
+    def _check_update(self, _icon=None, _item=None):
+        with self._lock:
+            if not self._update_available():
+                return
+            self._update_busy = True
+            self._update_label = "正在检查更新…"
+        self._update_display()
+
+        def check():
+            handed_off = False
+            try:
+                handed_off = bool(self.on_check_update(self._update_progress))
+            except Exception as exc:
+                LOG.exception("Update action failed")
+                self._notify(f"检查更新失败：{exc}")
+            finally:
+                with self._lock:
+                    self._update_busy = handed_off
+                    self._update_label = "正在安装更新…" if handed_off else "检查更新"
+                self._update_display()
+
+        self._dispatch("check-update", check)
+
     def _autostart_checked(self, _item=None):
         # This cache is updated only by actual reads, never optimistic writes.
         with self._lock:
@@ -345,7 +387,7 @@ class TrayController:
             else:
                 available, unavailable, total = self._counts
                 title = f"JumperManager · 已启动 {available}/总数 {total} · 异常 {unavailable}"
-            signature = (title, self._status_text(), self._autostart_text(),
+            signature = (title, self._status_text(), self._update_label, self._update_busy, self._autostart_text(),
                          self._autostart_checked(), self._autostart_available())
             if signature == self._last_display:
                 return

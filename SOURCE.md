@@ -1,19 +1,19 @@
 # Corresponding source
 
-JumperManager v1.2.2 is licensed under **AGPL-3.0-only**. The Windows and Linux
+JumperManager v1.2.3 is licensed under **AGPL-3.0-only**. The Windows and Linux
 executables in this release are built from the same application source at the
-`v1.2.2` tag:
+`v1.2.3` tag:
 
-https://github.com/pgq18/JumperManager/tree/v1.2.2
+https://github.com/pgq18/JumperManager/tree/v1.2.3
 
-The [v1.2.2 release](https://github.com/pgq18/JumperManager/releases/tag/v1.2.2)
+The [v1.2.3 release](https://github.com/pgq18/JumperManager/releases/tag/v1.2.3)
 provides these corresponding-source archives at no charge:
 
-- [JumperManager-Source-v1.2.2.zip](https://github.com/pgq18/JumperManager/releases/download/v1.2.2/JumperManager-Source-v1.2.2.zip):
+- [JumperManager-Source-v1.2.3.zip](https://github.com/pgq18/JumperManager/releases/download/v1.2.3/JumperManager-Source-v1.2.3.zip):
   the complete application source for both platforms, WebUI assets, tests,
   build scripts, pinned package requirements, license notices, and the matching
   pystray 0.19.5 and PyInstaller 6.22.3 source archives under `third-party-source/`.
-- [JumperManager-Linux-Source-v1.2.2.tar.gz](https://github.com/pgq18/JumperManager/releases/download/v1.2.2/JumperManager-Linux-Source-v1.2.2.tar.gz):
+- [JumperManager-Linux-Source-v1.2.3.tar.gz](https://github.com/pgq18/JumperManager/releases/download/v1.2.3/JumperManager-Linux-Source-v1.2.3.tar.gz):
   the same application source snapshot and build files, with the matching
   PyInstaller source archive for the Linux build.
 
@@ -26,6 +26,21 @@ Both standalone programs include their own Python runtime. Remote SSH
 endpoints do not need Python: TCP checks use OpenSSH forwarding, and
 optional Linux process snapshots use a read-only shell helper with system
 tools and `/proc`. Nothing is installed on the remote endpoint.
+
+## Application updates
+
+The Windows tray and Linux `update` command check the official GitHub
+repository's latest stable release. The updater downloads the matching
+platform archive and verifies its SHA-256 before installation. The update
+replaces the program and its accompanying delivery files, preserving `data/`
+and the user's SSH configuration. Normal use is described in [README.md](README.md)
+and [docs/LINUX.md](docs/LINUX.md).
+
+Source execution supports checking release information, but does not replace
+a source checkout with an official executable. Update the source and rebuild
+using the instructions below. Users of modified executables should retain
+their modifications and corresponding source before choosing an official
+binary update, which replaces the installed application.
 
 ## Rebuilding the Windows executable
 

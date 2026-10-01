@@ -131,13 +131,14 @@ def autostart_command(args):
 
 
 def serve(args):
+    from jumper_manager import __version__
     from jumper_manager.engine import Manager
     from jumper_manager.server import AppServer
 
     if not WINDOWS:
         os.umask(0o077)
     configure_logging()
-    identity = {"app": "JumperManager", "instance_id": secrets.token_hex(16), "pid": os.getpid(), "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "desktop": FROZEN and WINDOWS, "tray_ready": False}
+    identity = {"app": "JumperManager", "version": __version__, "instance_id": secrets.token_hex(16), "pid": os.getpid(), "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "desktop": FROZEN and WINDOWS, "tray_ready": False}
     # Lock and bind before constructing Manager; another launch must never
     # recover or clean up the first instance's tunnels.
     server = None
@@ -146,6 +147,11 @@ def serve(args):
     instance_lock = InstanceLock()
     try:
         instance_lock.acquire()
+        if getattr(args, "update_id", None):
+            identity["update_id"] = args.update_id
+        elif (DATA / "update-resume.json").exists():
+            from jumper_manager.update_install import resume_identity
+            identity["update_id"] = resume_identity(ROOT)
         server = AppServer(("127.0.0.1", args.port), None, BUNDLE_ROOT / "web", identity)
         manager = Manager(ROOT, config_path=args.ssh_config)
         server.manager = manager
@@ -158,6 +164,8 @@ def serve(args):
             from jumper_manager.tray import TrayController
             tray = TrayController(f"http://127.0.0.1:{server.server_address[1]}", DATA,
                                   manager.state, shutdown_signal)
+            from jumper_manager.updates import windows_update
+            tray.on_check_update = lambda progress: windows_update(ROOT, progress=progress)
             from jumper_manager.autostart import WindowsAutostart
             try:
                 tray.autostart = WindowsAutostart(autostart_command(args))
@@ -176,7 +184,14 @@ def serve(args):
         if hasattr(signal, "SIGTERM"):
             signal.signal(signal.SIGTERM, shutdown_signal)
 
+        update_resume = getattr(args, "update_resume", False)
+        if (DATA / "update-resume.json").exists():
+            from jumper_manager.update_install import consume_resume
+            update_resume = consume_resume(ROOT) or update_resume
+
         def auto_start():
+            if update_resume:
+                return
             for mapping in manager.state()["mappings"]:
                 if server.shutting_down:
                     break
@@ -269,6 +284,10 @@ def launch(args):
         command += ["--ssh-config", str(Path(args.ssh_config).expanduser().resolve())]
     if getattr(args, "tray", False):
         command.append("--tray")
+    if getattr(args, "update_resume", False):
+        command.append("--update-resume")
+    if getattr(args, "update_id", None):
+        command += ["--update-id", args.update_id]
     kwargs = {"cwd": str(ROOT), "stdin": subprocess.DEVNULL}
     if os.name == "nt":
         kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
@@ -348,6 +367,22 @@ def main():
     arguments = sys.argv[1:]
     if arguments and arguments[0] == "--json" and len(arguments) > 1:
         arguments = arguments[1:] + ["--json"]
+    if arguments and arguments[0] == "--update-probe":
+        if len(arguments) != 2 or not FROZEN:
+            raise ValueError("更新验证参数无效。")
+        from jumper_manager import __version__
+        Path(arguments[1]).write_text(json.dumps({"app": "JumperManager", "version": __version__}), encoding="utf-8")
+        return 0
+    if arguments and arguments[0] == "--apply-update":
+        if len(arguments) != 2 or not FROZEN:
+            raise ValueError("更新安装参数无效。")
+        prepare_frozen_runtime()
+        from jumper_manager.update_install import apply_install
+        return apply_install(Path(arguments[1]))
+    if arguments and arguments[0] == "update":
+        prepare_frozen_runtime()
+        from jumper_manager.updates import run
+        return run(arguments[1:], root=ROOT)
     if arguments and arguments[0] == "list":
         arguments = ["mappings", "list", *arguments[1:]]
     if arguments and arguments[0] in {"hosts", "mappings", "logs"}:
@@ -357,7 +392,7 @@ def main():
         from jumper_manager.linux_service import run
         return run(arguments[1:], root=ROOT, command_builder=service_command)
     parser = argparse.ArgumentParser(description="JumperManager - SSH 端口映射管理器", allow_abbrev=False,
-        epilog="list 查看所有映射；start/stop 名称或ID 控制单条映射，不带名称时控制管理器。更多命令：hosts / mappings / logs / autostart。")
+        epilog="list 查看所有映射；start/stop 名称或ID 控制单条映射，不带名称时控制管理器。update --check 检查更新，update 安装更新。更多命令：hosts / mappings / logs / autostart。")
     parser.add_argument("command", nargs="?", choices=["list", "start", "stop", "restart", "status", "serve", "open"], help="启动、停止、重启、状态、前台运行或打开 WebUI")
     parser.add_argument("tunnel", nargs="?", metavar="TUNNEL", help="start/stop 的映射名称、完整 ID 或唯一 ID 前缀；省略时控制管理器")
     mode = parser.add_mutually_exclusive_group()
@@ -371,6 +406,8 @@ def main():
     parser.add_argument("--no-browser", action="store_true")
     parser.add_argument("--open", dest="open_browser", action="store_true")
     parser.add_argument("--json", action="store_true", help="Machine-readable status")
+    parser.add_argument("--update-resume", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--update-id", help=argparse.SUPPRESS)
     from jumper_manager import __version__
     parser.add_argument("--version", action="version", version="JumperManager " + __version__)
     tray_mode = parser.add_mutually_exclusive_group()
