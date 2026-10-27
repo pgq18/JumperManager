@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from jumper_manager.engine import Manager
 from support import temp_directory
@@ -41,6 +41,7 @@ class OrderTests(unittest.TestCase):
         manager._hosts = [{"id": "local", "label": "本机", "route": ["local"]}]
         manager._discovery = {}
         manager._recovery_warnings = []
+        manager._daily_checks = Mock(spec=["refresh", "disarm"])
         return manager
 
     def create(self, name, **changes):
@@ -183,7 +184,7 @@ class OrderTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 self.manager.update(first, payload("renamed"))
             self.assertIs(self.manager._mappings[first], reference)
-            with patch.object(self.manager, "stop"), self.assertRaises(OSError):
+            with patch.object(self.manager, "stop", return_value={"status": "stopped"}), self.assertRaises(OSError):
                 self.manager.delete(first)
         self.assertEqual(self.ids(), original_order)
         self.assertIs(self.manager._mappings[first], reference)

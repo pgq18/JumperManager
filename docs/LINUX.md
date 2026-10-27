@@ -139,6 +139,9 @@ ssh -N -L 8876:127.0.0.1:8876 manager-server
 | `./jumper-manager stop demo` | 停止单条映射，保留配置 |
 | `./jumper-manager mappings edit demo --target-port 50053` | 修改目标端口；先停止映射 |
 | `./jumper-manager mappings edit demo --ssh-timeout 120` | 将这条映射的 SSH 连接等待时间设为 120 秒；先停止映射 |
+| `./jumper-manager mappings schedule demo` | 查看每日检查配置、下次时间及最近结果 |
+| `./jumper-manager mappings schedule demo --daily-check --daily-check-time 09:00` | 开启每天 09:00 检查，断连时自动重连；已启动时也可设置 |
+| `./jumper-manager mappings schedule demo --no-daily-check` | 关闭这条映射的每日检查，保持当前连接 |
 | `./jumper-manager mappings delete demo` | 删除映射配置；建议先停止并核对名称 |
 | `./jumper-manager mappings pin demo` | 置顶映射 |
 | `./jumper-manager mappings unpin demo` | 取消置顶 |
@@ -156,8 +159,10 @@ ssh -N -L 8876:127.0.0.1:8876 manager-server
 | `--target-address` | 相对于目标设备解析的服务地址，默认 `127.0.0.1` |
 | `--ssh-timeout` | 此映射的 SSH 连接等待时间，5–600 秒的整数，默认 30 秒；同样应用于跳板连接 |
 | `--auto-start` / `--no-auto-start` | 开启或关闭“管理器启动时自动建立此映射” |
+| `--daily-check` / `--no-daily-check` | 开启或关闭每日检查，断连时自动重连；默认关闭 |
+| `--daily-check-time` | 每天检查时间，严格使用 `HH:MM`，如 `09:00`；默认 `09:00`，使用管理器本地时间 |
 
-`add` 需要两端设备和端口，建议同时用 `--name` 设置便于识别的名称；`edit` 只传要修改的字段。编辑映射不会重置它的置顶状态。
+`add` 需要两端设备和端口，建议同时用 `--name` 设置便于识别的名称；`edit` 只传要修改的字段。编辑映射不会重置它的置顶状态或未指定的每日检查设置。只指定 `--daily-check-time` 不会改变每日检查的开关。
 
 WebUI 的新建、编辑窗口中，展开“高级设置”也可以设置“SSH 连接等待时间（秒）”，两端设置同步保存。这个时间按每次 SSH 连接计算，启动或检查的总耗时可能更长；目标服务仍然可以在映射启动后再启动。
 
@@ -180,6 +185,34 @@ WebUI 的新建、编辑窗口中，展开“高级设置”也可以设置“SS
 
 `logs` 不带映射标识时读取服务日志，也可以写成 `logs --server`；指定映射标识时读取该映射的日志。服务日志在管理器停止后也可读取。`--json` 可放在命令最后，适合脚本处理；命令帮助可通过 `./jumper-manager --help` 或相应子命令的 `--help` 查看。
 
+## 每日检查与断线重连
+
+每条映射独立设置，默认关闭。使用 `mappings schedule` 可以在映射已经启动时直接调整，不会为了保存设置而中断连接：
+
+```sh
+# 开启每天 09:00 检查；连接断开时自动重连
+./jumper-manager mappings schedule demo --daily-check --daily-check-time 09:00
+
+# 只调整时间，保留原来的开关状态
+./jumper-manager mappings schedule demo --daily-check-time 23:30
+
+# 查看当前配置和最近结果，不修改任何设置
+./jumper-manager mappings schedule demo
+
+# 关闭每日检查，保留当前连接和已设定的时间
+./jumper-manager mappings schedule demo --no-daily-check
+```
+
+时间使用**运行管理器的 Linux 设备的本地时间**，与打开 WebUI 的电脑时区无关。使用 24 小时制，必须填写两位小时和两位分钟，如 `09:00` 或 `23:30`。省略时间时保留已设定时间，新映射默认 `09:00`。命令同样支持完整 ID、唯一前缀或唯一名称，也可以加 `--json` 获取配置与 `scheduled_check` 检查结果。
+
+WebUI 中，新建或编辑映射时展开“高级设置”，可以设置“每日检查并自动重连”和“每天检查时间”。已有映射可点击列表里的时钟按钮“每日检查”直接调整。`list` 显示各条映射是否开启，`mappings show` 或 `mappings schedule` 显示下次检查及最近结果；详细记录通过 `logs demo` 查看。
+
+每天到点检查一次：SSH 连接或端口转发断开时重新建立映射，连接正常则保留。**目标服务未启动不会被当成断连，也不会因此重建映射。** 重连失败会记录原因，当天不会反复重试；可以排查后手动启动，或等待次日检查。
+
+修改了相关 SSH 配置后，自动重连会暂停。确认设备路径后，手动停止并重新启动这条映射即可恢复。
+
+管理器需要保持运行，不依赖 cron。电脑休眠错过检查时会在恢复后补查一次；当天时间已过再启用功能或启动映射时，从第二天开始。**手动停止的映射不会被自动启动。** 管理器重启后，只有重新启动的映射才继续参与检查；需要自动恢复时，为该映射另设 `--auto-start`，并按需开启管理器的登录自启。
+
 ## 先建立映射，再启动目标服务
 
 在 WebUI 选择来源设备、来源监听端口、目标设备和目标服务端口，保存后点击“启动”。例如：
@@ -200,7 +233,7 @@ source-device 的 127.0.0.1:50052
 | 有 N 个进程在用 | 检查到 N 个不同的监听进程，已按进程去重 |
 | 进程数或进程状态未知 | 权限、容器命名空间或检查条件不足，无法给出完整数量 |
 
-这些是启动或点击“检查”时的快照，不是客户端连接数量，也不表示业务请求一定成功。Linux 可能看得到监听端口，却看不到所属进程，此时显示未知。SSH 登录、入口端口或实际转发进程发生问题时，仍会显示启动失败或异常。
+这些是启动、点击“检查”或执行每日检查时的快照，不是客户端连接数量，也不表示业务请求一定成功。Linux 可能看得到监听端口，却看不到所属进程，此时显示未知。SSH 登录、入口端口或实际转发进程发生问题时，仍会显示启动失败或异常。
 
 ## 登录后自动启动
 

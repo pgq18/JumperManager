@@ -47,6 +47,7 @@
     connected: false, closed: false, refreshing: false, editing: null, previewKey: null,
     previewRequest: 0, formBusy: false, confirmResolver: null, renderSignature: "", graphSignature: "",
     dragging: null, orderBusy: false, orderRevision: 0, refreshAgain: false,
+    scheduleEditing: null, scheduleBusy: false,
   };
 
   function el(tag, className, text) {
@@ -429,11 +430,17 @@
       const usage = targetProcessSummary(mapping);
       const snapshot = el("div", "mapping-snapshot");
       const usageLabel = el("span", `usage-badge${usage.hasProcesses ? " in-use" : ""}`, usage.text);
-      usageLabel.title = "目标设备上监听此端口的真实进程数；启动或点击检查时更新。";
+      usageLabel.title = "目标设备上监听此端口的真实进程数；启动或检查时更新，包含每日检查。";
       snapshot.append(usageLabel);
+      if (mapping.daily_check_enabled === true) {
+        const daily = el("span", "mapping-schedule-summary");
+        daily.append(icon("clock"), document.createTextNode(`每天 ${mapping.daily_check_time || "09:00"} 检查`));
+        daily.title = scheduleNextRun(mapping);
+        snapshot.append(daily);
+      }
       const bottom = el("div", "mapping-row-bottom");
       const busy = state.busy.get(mapping.id);
-      const label = busy ? { start: "正在启动…", stop: "正在停止…", check: "正在检查…", delete: "正在删除…" }[busy] : usage.checkedAt ? `进程快照 ${formatTime(usage.checkedAt)} · 启动/检查时更新` : "尚未检查进程 · 启动或点击检查更新";
+      const label = busy ? { start: "正在启动…", stop: "正在停止…", check: "正在检查…", delete: "正在删除…" }[busy] : usage.checkedAt ? `进程快照 ${formatTime(usage.checkedAt)} · 启动/检查时更新` : "尚未检查进程 · 启动或检查时更新";
       bottom.append(el("span", "mapping-meta", label));
       const actions = el("div", "mapping-actions");
       const active = ["running", "starting", "degraded", "stopping"].includes(mapping.status);
@@ -445,7 +452,10 @@
       edit.disabled = state.orderBusy || !!busy || !["stopped", "error"].includes(mapping.status);
       const remove = button("", "trash", "icon-button", () => deleteMapping(mapping), active ? "先停止映射再删除" : "删除映射");
       remove.disabled = state.orderBusy || !!busy || active;
-      actions.append(toggle, check, edit, remove);
+      const schedule = button("", "clock", `icon-button schedule-button${mapping.daily_check_enabled === true ? " is-enabled" : ""}`, () => openScheduleDialog(mapping), "每日检查");
+      schedule.setAttribute("aria-haspopup", "dialog");
+      schedule.disabled = state.orderBusy;
+      actions.append(toggle, check, schedule, edit, remove);
       const order = el("div", "mapping-order-controls");
       const pin = button("", "pin", `icon-button${mapping.pinned === true ? " is-pinned" : ""}`, () => pinMapping(mapping), mapping.pinned === true ? "取消置顶" : "置顶映射");
       pin.dataset.orderControl = "pin"; pin.setAttribute("aria-pressed", String(mapping.pinned === true)); pin.disabled = state.orderBusy || !!state.busy.size;
@@ -488,8 +498,22 @@
     const usageBox = el("div", "usage-details");
     usageBox.append(el("h4", "detail-section-label", "目标端口进程"), el("strong", `usage-summary${usage.hasProcesses ? " in-use" : ""}`, usage.text));
     usageBox.append(el("p", "usage-timestamp", usage.checkedAt ? `采样于 ${formatTime(usage.checkedAt, true)}` : "尚无进程快照"));
-    usageBox.append(el("small", "", "仅在启动或点击“检查”时更新。统计目标端口的监听进程，不按客户端连接数量计算。"));
+    usageBox.append(el("small", "", "启动或检查时更新，包含每日检查。统计目标端口的监听进程，不按客户端连接数量计算。"));
     container.append(usageBox);
+    if (mapping.daily_check_enabled === true) {
+      const schedule = mapping.scheduled_check || {};
+      const section = el("section", "schedule-details");
+      const heading = el("div", "schedule-detail-heading");
+      heading.append(el("h4", "detail-section-label", "每日检查"), button("设置", "clock", "text-button", () => openScheduleDialog(mapping), "修改每日检查设置"));
+      section.append(heading, kv("检查时间", `每天 ${mapping.daily_check_time || "09:00"}`));
+      section.append(el("p", "schedule-help", `管理器电脑本地时间${schedule.timezone ? ` · ${schedule.timezone}` : ""}`));
+      section.append(el("p", "schedule-next-run", scheduleNextRun(mapping)));
+      if (schedule.last_run) section.append(el("p", "schedule-help", `上次检查 ${scheduleLocalTime(schedule.last_run)}`));
+      const resultLabels = { ok: "检查正常", reconnected: "已重新连接", failed: "检查或重连失败", checking: "正在检查…", skipped: "已跳过" };
+      if (resultLabels[schedule.result]) section.append(el("p", `schedule-result${schedule.result === "failed" ? " failed" : ""}`, resultLabels[schedule.result]));
+      if (schedule.message) section.append(el("p", "schedule-help", schedule.message));
+      container.append(section);
+    }
     const diagnostics = el("details", "mapping-diagnostics"); diagnostics.open = !!diagnosticsOpen;
     diagnostics.append(el("summary", "", "诊断详情"));
     if (mapping.error) diagnostics.append(el("p", "diagnostic-error", mapping.error));
@@ -523,6 +547,73 @@
       try { await navigator.clipboard.writeText(address); showToast(`已复制 ${address}（在 ${hostLabel(mapping.source_host)} 上使用）`); }
       catch { showToast(`访问入口：${address}（在 ${hostLabel(mapping.source_host)} 上使用）`); }
     }); footer.append(copy); container.append(footer);
+  }
+
+  // Preserve the manager's local wall-clock time instead of converting to the browser's timezone.
+  function scheduleLocalTime(value) {
+    const match = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/.exec(value || "");
+    return match ? `${match[1]} ${match[2]}` : String(value || "");
+  }
+  function scheduleNextRun(mapping) {
+    const schedule = mapping.scheduled_check || {};
+    if (schedule.next_run) return `下次检查 ${scheduleLocalTime(schedule.next_run)}`;
+    if (schedule.eligible === false) return "当前不安排检查；启动映射后生效。";
+    return "下次检查时间由管理器安排。";
+  }
+  function schedulePayload(enabledId, timeId) {
+    syncScheduleTime(enabledId, timeId);
+    const time = $(timeId).value;
+    if (!validScheduleTime(time)) throw new Error("请填写有效的每天检查时间（00:00–23:59）。");
+    return { daily_check_enabled: $(enabledId).checked, daily_check_time: time };
+  }
+  function validScheduleTime(value) { return /^([01]\d|2[0-3]):[0-5]\d$/.test(value || ""); }
+  function syncScheduleTime(enabledId, timeId) {
+    const input = $(timeId), enabled = $(enabledId).checked;
+    if (!enabled && !validScheduleTime(input.value)) input.value = validScheduleTime(input.dataset.savedTime) ? input.dataset.savedTime : "09:00";
+    input.disabled = !enabled;
+  }
+  function openScheduleDialog(mapping) {
+    state.scheduleEditing = mapping.id;
+    state.scheduleBusy = false;
+    $("scheduleMappingName").textContent = mapping.name || "未命名映射";
+    $("scheduleEnabled").checked = mapping.daily_check_enabled === true;
+    $("scheduleTime").value = mapping.daily_check_time || "09:00";
+    $("scheduleTime").dataset.savedTime = $("scheduleTime").value;
+    $("scheduleTimezone").textContent = `使用运行 JumperManager 的电脑本地时间${mapping.scheduled_check?.timezone ? `（${mapping.scheduled_check.timezone}）` : ""}。`;
+    $("scheduleError").hidden = true;
+    setScheduleBusy(false);
+    $("scheduleDialog").showModal();
+  }
+  function setScheduleBusy(busy) {
+    state.scheduleBusy = busy;
+    for (const id of ["scheduleEnabled", "closeScheduleButton", "cancelScheduleButton", "saveScheduleButton"]) $(id).disabled = busy;
+    $("scheduleTime").disabled = busy || !$("scheduleEnabled").checked;
+    $("saveScheduleButton").textContent = busy ? "保存中…" : "保存设置";
+  }
+  function closeScheduleDialog() {
+    if (state.scheduleBusy) return;
+    $("scheduleDialog").close();
+    state.scheduleEditing = null;
+  }
+  async function saveSchedule(event) {
+    event.preventDefault();
+    if (state.scheduleBusy || !state.scheduleEditing) return;
+    let payload;
+    try { payload = schedulePayload("scheduleEnabled", "scheduleTime"); }
+    catch (error) { $("scheduleError").textContent = error.message; $("scheduleError").hidden = false; return; }
+    const id = state.scheduleEditing;
+    setScheduleBusy(true); $("scheduleError").hidden = true;
+    try {
+      const updated = await api(`/api/mappings/${encodeURIComponent(id)}/schedule`, "POST", payload);
+      const index = state.data.mappings.findIndex((mapping) => mapping.id === id);
+      if (index >= 0) state.data.mappings[index] = updated;
+      state.selected = id;
+      setScheduleBusy(false); closeScheduleDialog();
+      state.renderSignature = ""; render();
+      showToast(payload.daily_check_enabled ? `已设置每天 ${payload.daily_check_time} 检查，断连时自动重连。` : "已关闭这条映射的每日检查。");
+      void refreshState();
+    } catch (error) { $("scheduleError").textContent = error.message; $("scheduleError").hidden = false; }
+    finally { setScheduleBusy(false); }
   }
 
   async function mappingAction(mapping, action) {
@@ -841,6 +932,10 @@
     $("formBindAddress").value = mapping?.bind_address || "127.0.0.1";
     $("formTargetAddress").value = mapping?.target_address || "127.0.0.1";
     $("formAutoStart").checked = mapping?.auto_start === true;
+    $("formDailyCheckEnabled").checked = mapping?.daily_check_enabled === true;
+    $("formDailyCheckTime").value = mapping?.daily_check_time || "09:00";
+    $("formDailyCheckTime").dataset.savedTime = $("formDailyCheckTime").value;
+    syncScheduleTime("formDailyCheckEnabled", "formDailyCheckTime");
     $("formError").hidden = true; $("previewPanel").hidden = true; $("formConfigNotice").hidden = true;
     $("saveMappingButton").disabled = true; $("saveMappingButton").textContent = "保存映射";
     $("previewButton").disabled = false; $("previewButton").classList.remove("spin");
@@ -862,6 +957,9 @@
     $("formSshTimeout").value = existing?.ssh_timeout ?? 30;
     $("formBindAddress").value = existing?.bind_address || "127.0.0.1";
     $("formTargetAddress").value = existing?.target_address || "127.0.0.1"; $("formAutoStart").checked = false;
+    $("formDailyCheckEnabled").checked = false; $("formDailyCheckTime").value = "09:00";
+    $("formDailyCheckTime").dataset.savedTime = "09:00";
+    syncScheduleTime("formDailyCheckEnabled", "formDailyCheckTime");
     invalidatePreview(); $("formError").hidden = true; $("formConfigNotice").hidden = false;
     $("formConfigNotice").textContent = existing ? "已填入当前选中映射的设备与端口作为示例。请调整监听端口，避免与原映射冲突；尚未保存或启动。" : "已根据当前 SSH 设备填入示例。请将端口修改为实际服务端口；尚未保存或启动。";
   }
@@ -873,7 +971,7 @@
     const source = $("formSourceHost").value, target = $("formTargetHost").value, targetAddress = $("formTargetAddress").value.trim();
     if (!source || !target) throw new Error("请选择来源设备和目标设备。");
     if (!targetAddress) throw new Error("请填写目标设备上的服务地址。");
-    return { name: $("formName").value.trim() || `${hostLabel(source)} → ${hostLabel(target)} · ${sourcePort}`, source_host: source, source_port: sourcePort, target_host: target, target_port: targetPort, ssh_timeout: sshTimeout, bind_address: $("formBindAddress").value, target_address: targetAddress, auto_start: $("formAutoStart").checked };
+    return { name: $("formName").value.trim() || `${hostLabel(source)} → ${hostLabel(target)} · ${sourcePort}`, source_host: source, source_port: sourcePort, target_host: target, target_port: targetPort, ssh_timeout: sshTimeout, bind_address: $("formBindAddress").value, target_address: targetAddress, auto_start: $("formAutoStart").checked, ...schedulePayload("formDailyCheckEnabled", "formDailyCheckTime") };
   }
   function invalidatePreview() { state.previewKey = null; state.previewRequest++; $("saveMappingButton").disabled = true; $("previewPanel").hidden = true; }
   function showFormError(message) { $("formError").textContent = message; $("formError").hidden = false; }
@@ -906,13 +1004,14 @@
     let payload; try { payload = formPayload(); } catch (error) { showFormError(error.message); return; }
     if (JSON.stringify(payload) !== state.previewKey) { showFormError("配置已变更，请先重新预览连接路径。"); return; }
     state.formBusy = true; $("saveMappingButton").disabled = true; $("saveMappingButton").textContent = "保存中…"; $("previewButton").disabled = true; $("exampleButton").disabled = true;
+    $("formDailyCheckEnabled").disabled = true; $("formDailyCheckTime").disabled = true;
     $("formError").hidden = true;
     try {
       const mapping = await api(state.editing ? `/api/mappings/${encodeURIComponent(state.editing)}` : "/api/mappings", state.editing ? "PUT" : "POST", payload);
       state.selected = mapping.id; state.graphMode = "mapping"; $("mappingDialog").close();
       showToast("映射已保存，点击“启动”即可建立隧道。"); await refreshState();
     } catch (error) { showFormError(error.message); }
-    finally { state.formBusy = false; $("saveMappingButton").disabled = !state.previewKey; $("saveMappingButton").textContent = "保存映射"; $("previewButton").disabled = false; $("exampleButton").disabled = false; }
+    finally { state.formBusy = false; $("saveMappingButton").disabled = !state.previewKey; $("saveMappingButton").textContent = "保存映射"; $("previewButton").disabled = false; $("exampleButton").disabled = false; $("formDailyCheckEnabled").disabled = false; syncScheduleTime("formDailyCheckEnabled", "formDailyCheckTime"); }
   }
   async function shutdown() {
     if (!await confirmAction("关闭 JumperManager？", "程序将停止由它管理的所有端口映射，然后关闭本机服务。\n\n关闭浏览器页面不会停止隧道；确认此操作才会结束程序。", "停止映射并关闭")) return;
@@ -932,6 +1031,12 @@
     $("mappingForm").addEventListener("input", invalidatePreview);
     $("mappingForm").addEventListener("change", invalidatePreview);
     $("mappingForm").addEventListener("submit", saveMapping);
+    $("formDailyCheckEnabled").addEventListener("change", () => syncScheduleTime("formDailyCheckEnabled", "formDailyCheckTime"));
+    $("scheduleEnabled").addEventListener("change", () => syncScheduleTime("scheduleEnabled", "scheduleTime"));
+    $("scheduleForm").addEventListener("submit", saveSchedule);
+    $("closeScheduleButton").addEventListener("click", closeScheduleDialog);
+    $("cancelScheduleButton").addEventListener("click", closeScheduleDialog);
+    $("scheduleDialog").addEventListener("cancel", (event) => { event.preventDefault(); closeScheduleDialog(); });
     $("previewButton").addEventListener("click", previewMapping);
     $("exampleButton").addEventListener("click", fillExample);
     $("mappingSearch").addEventListener("input", renderMappings);

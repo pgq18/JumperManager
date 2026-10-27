@@ -224,6 +224,8 @@ class Handler(BaseHTTPRequestHandler):
                     result = {"ok": True}
                 elif self.command == "POST" and action in {"start", "stop", "check"}:
                     result = getattr(manager, action)(mapping_id)
+                elif self.command == "POST" and action == "schedule":
+                    result = manager.set_schedule(mapping_id, body)
                 elif self.command == "POST" and action == "pin":
                     pinned = body.get("pinned")
                     if not isinstance(pinned, bool):

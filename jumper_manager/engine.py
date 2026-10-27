@@ -18,6 +18,7 @@ import time
 import uuid
 
 from .connections import local_connections, peer_key
+from .daily_checks import DailyChecks, SCHEDULE_FIELDS, DEFAULT_DAILY_CHECK_TIME, validate_schedule
 from .target_processes import local_target_processes
 from .remote_linux import (remote_snapshot_script, parse_connection_snapshot,
                            remote_target_process_script, parse_target_snapshot)
@@ -37,7 +38,7 @@ SAFE_OPTIONS = ["BatchMode=yes", "PasswordAuthentication=no", "KbdInteractiveAut
                 "ServerAliveInterval=15",
                 "ControlMaster=no", "ControlPath=none", "RequestTTY=no",
                 "ForkAfterAuthentication=no", "PermitLocalCommand=no", "RemoteCommand=none"]
-FIELDS = ("name", "source_host", "source_port", "target_host", "target_port", "bind_address", "target_address", "auto_start", "pinned", "ssh_timeout")
+FIELDS = ("name", "source_host", "source_port", "target_host", "target_port", "bind_address", "target_address", "auto_start", "pinned", "ssh_timeout", *SCHEDULE_FIELDS)
 
 
 def ssh_wait_seconds(value) -> int:
@@ -232,6 +233,9 @@ class Manager:
             self._hosts = [{"id": "local", "alias": "local", "label": "本机", "hostname": "127.0.0.1", "user": "", "port": None, "route": ["local"], "warning": self._discovery["error"]}]
             self._write_safe_config()
         self._load()
+        self._daily_checks = DailyChecks(self, atomic_json)
+        for mapping_id in self._mappings:
+            self._daily_checks.refresh(mapping_id)
         self._monitor_thread = threading.Thread(target=self._monitor, daemon=True, name="ssh-monitor")
         self._monitor_thread.start()
         self._config_thread = threading.Thread(target=self._watch_config, daemon=True, name="ssh-config-watch")
@@ -346,7 +350,9 @@ class Manager:
 
     def _refresh_mapping_plans(self, previous):
         for mapping in self._mappings.values():
-            active = mapping["status"] in {"starting", "running", "degraded", "stopping"}
+            scheduler = getattr(self, "_daily_checks", None)
+            active = (mapping["status"] in {"starting", "running", "degraded", "stopping"}
+                      or (scheduler is not None and mapping["id"] in scheduler._intent))
             if active:
                 aliases = {node["host"] for node in mapping.get("route", []) if node["host"] != "local"}
                 if any(previous.get(alias) != self._effective.get(alias) for alias in aliases):
@@ -477,6 +483,7 @@ class Manager:
         if not isinstance(pinned, bool):
             raise ValueError("pinned 必须是布尔值。")
         result["pinned"] = pinned
+        result.update(validate_schedule(payload))
         if result["source_host"] == result["target_host"] and result["source_port"] == result["target_port"] and result["bind_address"] == result["target_address"]:
             raise ValueError("监听端点和目标端点相同会形成回路，请修改设备、地址或端口。")
         return result
@@ -546,6 +553,8 @@ class Manager:
                     mapping = {key: entry.get(key) for key in FIELDS}
                     mapping["pinned"] = pinned
                     mapping["ssh_timeout"] = entry.get("ssh_timeout", DEFAULT_SSH_TIMEOUT)
+                    mapping["daily_check_enabled"] = entry.get("daily_check_enabled", False)
+                    mapping["daily_check_time"] = entry.get("daily_check_time", DEFAULT_DAILY_CHECK_TIME)
                     mapping.update({"id": mapping_id, "status": "error", "route": [], "plan": {"route": [], "description": "配置需要修正", "warnings": [str(exc)], "steps": []},
                                     "error": str(exc), "health": None, "usage": None, "target_usage": None, "last_checked": None, "logs": []})
                 self._mappings[mapping_id] = mapping
@@ -561,6 +570,8 @@ class Manager:
 
     def state(self) -> dict:
         with self._lock:
+            for mapping_id in self._mappings:
+                self._daily_checks.refresh(mapping_id)
             ordered = sorted(self._mappings.values(), key=lambda value: not value.get("pinned", False))
             return {"hosts": copy.deepcopy(self._hosts), "mappings": copy.deepcopy(ordered), "ssh_config": str(self.config_path), "version": VERSION, "ssh_discovery": copy.deepcopy(self._discovery)}
 
@@ -586,6 +597,7 @@ class Manager:
                 del self._mapping_locks[mapping_id]
                 raise
             self._log(mapping_id, "info", "映射已保存，尚未启动。")
+            self._daily_checks.refresh(mapping_id)
             return copy.deepcopy(mapping)
 
     def update(self, mapping_id, payload):
@@ -598,6 +610,9 @@ class Manager:
                 raise ValueError("请先停止映射再修改。")
             if isinstance(payload, dict) and "ssh_timeout" not in payload:
                 payload = {**payload, "ssh_timeout": old.get("ssh_timeout", DEFAULT_SSH_TIMEOUT)}
+            if isinstance(payload, dict):
+                payload = {**{key: old.get(key, False if key == "daily_check_enabled" else DEFAULT_DAILY_CHECK_TIME)
+                              for key in SCHEDULE_FIELDS}, **payload}
             value = self._validate(payload)
             # Editing connection settings must not reset list metadata omitted
             # by the form. Pin changes have their own endpoint and ordering rule.
@@ -609,7 +624,30 @@ class Manager:
             except Exception:
                 self._mappings[mapping_id] = old
                 raise
+            self._daily_checks.disarm(mapping_id)
             self._log(mapping_id, "info", "映射配置已更新。")
+            return copy.deepcopy(mapping)
+
+    def set_schedule(self, mapping_id, payload):
+        changes = validate_schedule(payload, partial=True)
+        # Do not wait for a slow SSH check: disabling must cancel a pending
+        # automatic reconnect immediately. Only settings are changed here.
+        with self._lock:
+            if self._closed.is_set():
+                raise RuntimeError("程序正在关闭。")
+            mapping = self._get(mapping_id)
+            previous = {key: mapping.get(key) for key in SCHEDULE_FIELDS}
+            mapping.update(changes)
+            try:
+                self._save()
+            except Exception:
+                mapping.update(previous)
+                raise
+            if any(previous[key] != mapping[key] for key in SCHEDULE_FIELDS):
+                self._daily_checks.changed(mapping_id)
+                self._log(mapping_id, "info", f"每日检查已启用，时间 {mapping['daily_check_time']}（管理器所在设备的本地时间）。"
+                          if mapping["daily_check_enabled"] else "每日检查已关闭。")
+            self._daily_checks.refresh(mapping_id)
             return copy.deepcopy(mapping)
 
     def pin(self, mapping_id, pinned):
@@ -657,8 +695,11 @@ class Manager:
 
     def delete(self, mapping_id):
         self._get(mapping_id)
+        self._daily_checks.disarm(mapping_id)
         with self._mapping_locks[mapping_id]:
-            self.stop(mapping_id)
+            stopped = self.stop(mapping_id)
+            if stopped.get("status") != "stopped":
+                raise RuntimeError("此映射有更新的启动操作，已取消删除；请停止后再删除。")
             with self._lock:
                 previous = self._mappings.copy()
                 self._mappings.pop(mapping_id)
@@ -667,6 +708,7 @@ class Manager:
                 except Exception:
                     self._mappings = previous
                     raise
+                self._daily_checks.disarm(mapping_id)
 
     def _log(self, mapping_id, level, message):
         with self._lock:
@@ -902,9 +944,16 @@ class Manager:
 
     def start(self, mapping_id):
         self._get(mapping_id)
-        with self._mapping_locks[mapping_id]:
+        with self._lock:
             if self._closed.is_set():
                 raise RuntimeError("程序正在关闭。")
+            generation = self._daily_checks.arm(mapping_id)
+        return self._start_mapping(mapping_id, generation)
+
+    def _start_mapping(self, mapping_id, generation, schedule_revision=None):
+        self._get(mapping_id)
+        with self._mapping_locks[mapping_id]:
+            self._daily_checks.ensure_current(mapping_id, generation, schedule_revision)
             with self._lock:
                 mapping = self._get(mapping_id)
                 mapping.pop("failure_stage", None)
@@ -917,20 +966,22 @@ class Manager:
                     health = result.get("health") or {}
                     if health.get("tunnel_ok") is not True:
                         raise RuntimeError(health.get("summary") or "启动后的连接检查未通过。")
+                    self._daily_checks.ensure_current(mapping_id, generation, schedule_revision)
+                    self._daily_checks.refresh(mapping_id)
                     return result
                 if has_resources:
                     # Failed rollback may leave owned resources. Never append
                     # new SSH legs or overwrite a relay before cleanup succeeds.
                     self._cleanup(mapping_id)
                 with self._lock:
+                    self._daily_checks.ensure_current(mapping_id, generation, schedule_revision)
                     value = self._validate(mapping)
                     plan = self.preview(value)
                     mapping.update(status="starting", error=None, health=None, usage=None, target_usage=None, plan=plan, route=plan["route"], config_changed=False, config_error=False)
                 self._probe_peers.pop(mapping_id, None)
                 self._log(mapping_id, "info", "开始检查监听端口并建立隧道；目标服务可以稍后启动。")
                 available = self._endpoint_check(value["source_host"], "available", value["bind_address"], value["source_port"])
-                if self._closed.is_set():
-                    raise RuntimeError("程序正在关闭，已取消启动。")
+                self._daily_checks.ensure_current(mapping_id, generation, schedule_revision)
                 if not available["ok"]:
                     raise RuntimeError(f"监听端口 {value['source_host']} {value['bind_address']}:{value['source_port']} 不可用：{available['message']}")
                 source, target_host = value["source_host"], value["target_host"]
@@ -953,6 +1004,7 @@ class Manager:
                         entry = self._spawn(mapping_id, target_host, "-L", spec)
                         self._wait_ready(mapping_id, entry, "127.0.0.1", relay_port)
                         destination_address, destination_port = "127.0.0.1", relay_port
+                    self._daily_checks.ensure_current(mapping_id, generation, schedule_revision)
                     spec = forward_spec(value["bind_address"], value["source_port"], destination_address, destination_port)
                     entry = self._spawn(mapping_id, source, "-R", spec)
                     self._wait_ready(mapping_id, entry)
@@ -964,7 +1016,10 @@ class Manager:
                 health = result.get("health") or {}
                 if health.get("tunnel_ok") is not True:
                     raise RuntimeError(health.get("summary") or "启动后的连接检查未通过。")
-                return result
+                self._daily_checks.ensure_current(mapping_id, generation, schedule_revision)
+                with self._lock:
+                    self._daily_checks.refresh(mapping_id)
+                    return copy.deepcopy(mapping)
             except Exception as exc:
                 cleanup_failed = False
                 try:
@@ -975,6 +1030,7 @@ class Manager:
                 self._probe_peers.pop(mapping_id, None)
                 with self._lock:
                     mapping.update(status="error", error=str(exc), failure_stage="start", usage=None, target_usage=None)
+                    self._daily_checks.refresh(mapping_id)
                 cleanup_message = "部分资源清理未完成，已保留所有权记录，可重试" if cleanup_failed else "已清理本次创建的隧道"
                 self._log(mapping_id, "error", f"启动失败，{cleanup_message}：{exc}")
                 raise RuntimeError(str(exc)) from exc
@@ -1015,9 +1071,15 @@ class Manager:
 
     def stop(self, mapping_id):
         self._get(mapping_id)
+        # Cancel before taking the mapping lock, even if a daily check is in SSH.
+        generation = self._daily_checks.disarm(mapping_id)
         with self._mapping_locks[mapping_id]:
             with self._lock:
                 mapping = self._get(mapping_id)
+                # A newer start can overtake this stop while both wait for a
+                # slow check. Never stop that newer operation's resources.
+                if not self._daily_checks.latest_operation(mapping_id, generation):
+                    return copy.deepcopy(mapping)
                 mapping.pop("failure_stage", None)
                 mapping["status"] = "stopping"
             try:
@@ -1150,6 +1212,7 @@ class Manager:
         if self._closed.is_set():
             return
         self._closed.set()
+        self._daily_checks.close()
         self._monitor_thread.join(timeout=3)
         self._config_thread.join(timeout=3)
         with self._lock:

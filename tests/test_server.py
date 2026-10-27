@@ -71,6 +71,10 @@ class FakeManager:
         self._record("pin", mapping_id, pinned)
         return {**self.mapping, "id": mapping_id, "pinned": pinned}
 
+    def set_schedule(self, mapping_id, payload):
+        self._record("set_schedule", mapping_id, payload)
+        return {**self.mapping, **payload, "id": mapping_id}
+
 
 class ServerTests(unittest.TestCase):
     def setUp(self):
@@ -224,6 +228,39 @@ class ServerTests(unittest.TestCase):
                 self.assertEqual(data["id"], "example")
                 self.assertIs(data["pinned"], pinned)
                 self.assertEqual(self.manager.calls[-1], ("pin", ("example", pinned)))
+
+    def test_schedule_can_be_changed_while_running_without_stop(self):
+        self.manager.mapping["status"] = "running"
+        payload = {"daily_check_enabled": True, "daily_check_time": "09:15"}
+        status, _, data = self.request("POST", "/api/mappings/example/schedule", payload)
+        self.assertEqual(status, 200, data)
+        self.assertEqual(data["status"], "running")
+        self.assertEqual(data["daily_check_time"], "09:15")
+        self.assertEqual(self.manager.calls, [("set_schedule", ("example", payload))])
+
+    def test_schedule_keeps_auth_origin_shutdown_and_route_guards(self):
+        path = "/api/mappings/example/schedule"
+        payload = {"daily_check_enabled": False}
+        for headers in ({}, {"X-Jumper-Token": "wrong-token"}):
+            status, _, _ = self.request("POST", path, payload, token=False, headers=headers)
+            self.assertEqual(status, 403)
+        status, _, _ = self.request("POST", path, payload, headers={"Origin": "https://example.com"})
+        self.assertEqual(status, 403)
+        for method, bad_path in (("PUT", path), ("DELETE", path), ("GET", path), ("POST", path + "/extra")):
+            status, _, _ = self.request(method, bad_path, payload if method != "GET" else None)
+            self.assertEqual(status, 404)
+        self.server.shutting_down = True
+        status, _, _ = self.request("POST", path, payload)
+        self.assertEqual(status, 503)
+        self.assertEqual(self.manager.calls, [])
+
+    def test_schedule_validation_and_save_errors_are_visible(self):
+        path = "/api/mappings/example/schedule"
+        for error, expected in ((ValueError("invalid time"), 400), (KeyError("missing"), 404), (OSError("save failed"), 409)):
+            self.manager.failures["set_schedule"] = error
+            status, _, body = self.request("POST", path, {"daily_check_enabled": True})
+            self.assertEqual(status, expected)
+            self.assertIn("error", body)
 
     def test_ordering_payload_validation_prevents_manager_calls(self):
         cases = [

@@ -6,12 +6,14 @@ import argparse
 from collections import deque
 import json
 from pathlib import Path
+import re
 import sys
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
 
 MAPPING_FIELDS = ("name", "source_host", "source_port", "target_host", "target_port",
-                  "bind_address", "target_address", "auto_start", "ssh_timeout")
+                  "bind_address", "target_address", "auto_start", "ssh_timeout",
+                  "daily_check_enabled", "daily_check_time")
 
 
 class CommandError(Exception):
@@ -55,6 +57,22 @@ def _ssh_timeout(value):
     return number
 
 
+def _daily_check_time(value):
+    if not re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", value):
+        raise argparse.ArgumentTypeError("每日检查时间必须是 HH:MM 格式，例如 09:00（00:00–23:59）")
+    return value
+
+
+def _schedule_flags(parser):
+    schedule = parser.add_mutually_exclusive_group()
+    schedule.add_argument("--daily-check", dest="daily_check_enabled", action="store_true",
+                          default=argparse.SUPPRESS, help="开启每日检查，断连时自动重连")
+    schedule.add_argument("--no-daily-check", dest="daily_check_enabled", action="store_false",
+                          default=argparse.SUPPRESS, help="关闭每日检查")
+    parser.add_argument("--daily-check-time", type=_daily_check_time, default=argparse.SUPPRESS,
+                        help="每天检查时间，HH:MM，默认 09:00，使用管理器本地时间；不改变开关")
+
+
 def _mapping_flags(parser, *, required):
     parser.add_argument("--name", default=argparse.SUPPRESS, help="映射名称")
     for name in ("source", "target"):
@@ -72,6 +90,7 @@ def _mapping_flags(parser, *, required):
                          default=argparse.SUPPRESS, help="管理器启动时自动启动此映射")
     startup.add_argument("--no-auto-start", dest="auto_start", action="store_false",
                          default=argparse.SUPPRESS, help="取消此映射的自动启动")
+    _schedule_flags(parser)
 
 
 def _parser():
@@ -94,6 +113,10 @@ def _parser():
     edit = actions.add_parser("edit", help="只修改指定字段；需先停止映射")
     edit.add_argument("ref", metavar="REF")
     _mapping_flags(edit, required=False)
+    schedule = actions.add_parser("schedule", help="查看或设置每日检查；已启动的映射也可设置",
+                                  description="省略选项只查看；指定开关或时间时仅修改每日检查设置。")
+    schedule.add_argument("ref", metavar="REF")
+    _schedule_flags(schedule)
     for action, help_text in (("show", "查看映射详情"), ("delete", "删除已停止的映射"),
                               ("start", "启动映射"), ("stop", "停止映射"),
                               ("check", "检查映射并更新目标进程数"),
@@ -266,6 +289,14 @@ def _execute(args, *, running, request, data):
     path = _mapping_path(mapping)
     if args.action == "show":
         return mapping, "mapping", 0
+    if args.action == "schedule":
+        changes = _payload(args)
+        if not changes:
+            return mapping, "mapping", 0
+        settings = {"daily_check_enabled": mapping.get("daily_check_enabled", False),
+                    "daily_check_time": mapping.get("daily_check_time", "09:00")}
+        settings.update(changes)
+        return client.call(path + "/schedule", settings), "mapping", 0
     if args.action == "edit":
         # PUT validates a complete configuration. Preserve settings omitted by
         # this CLI edit without sending runtime state or list metadata back.
@@ -302,6 +333,30 @@ def _endpoint(mapping, side):
     return f"{mapping.get(side + '_host', '?')}:{mapping.get(side + '_port', '?')}"
 
 
+def _schedule_summary(mapping):
+    if mapping.get("daily_check_enabled") is True:
+        return f"每天 {mapping.get('daily_check_time', '09:00')}"
+    return "已关闭"
+
+
+def _print_schedule(mapping):
+    runtime = mapping.get("scheduled_check") or {}
+    timezone = runtime.get("timezone")
+    zone_label = f"管理器本地时间，{timezone}" if timezone else "管理器本地时间"
+    print(_text(f"每日检查：{_schedule_summary(mapping)}（{zone_label}）"))
+    if mapping.get("daily_check_enabled") is True:
+        if runtime.get("next_run"):
+            print(_text(f"下次检查：{runtime['next_run']}"))
+        elif runtime.get("eligible") is False:
+            print("下次检查：当前不参与定时检查；手动停止的映射不会自动启动。")
+    if runtime.get("last_run") or runtime.get("result"):
+        status = {"ok": "检查通过", "reconnected": "已重新连接", "failed": "失败",
+                  "checking": "检查中", "skipped": "已跳过"}.get(runtime.get("result"), "尚无结果")
+        print(_text(f"最近定时检查：{runtime.get('last_run') or '—'}；{status}"))
+        if runtime.get("message"):
+            print(_text(runtime["message"]))
+
+
 def _print_human(result, kind):
     if kind == "hosts":
         print("设备\tSSH 地址\t设备路径")
@@ -314,11 +369,11 @@ def _print_human(result, kind):
     elif kind == "probe":
         print(_text(f"{result.get('alias', '')}：{'测试通过' if result.get('ok') is True else '测试失败'}。{result.get('message', '')}"))
     elif kind == "mappings":
-        print("ID\t名称\t状态\t目标进程\t入口 → 目标\t置顶")
+        print("ID\t名称\t状态\t目标进程\t入口 → 目标\t置顶\t每日检查")
         for item in result.get("mappings", []):
             print("\t".join(map(_cell, (item.get("id"), item.get("name"), mapping_status(item),
                                         process_summary(item), f"{_endpoint(item, 'source')} → {_endpoint(item, 'target')}",
-                                        "是" if item.get("pinned") is True else "否"))))
+                                        "是" if item.get("pinned") is True else "否", _schedule_summary(item)))))
         if not result.get("mappings"):
             print("尚无映射。")
     elif kind in {"mapping", "unchecked_mapping"}:
@@ -333,6 +388,7 @@ def _print_human(result, kind):
         if target_usage.get("checked_at"):
             print(_text("进程快照：" + target_usage["checked_at"] + "（启动或检查时更新）"))
         print(f"置顶：{'是' if result.get('pinned') is True else '否'}；自动启动：{'是' if result.get('auto_start') is True else '否'}")
+        _print_schedule(result)
         if result.get("error"):
             print(_text("原因：" + str(result["error"])))
         elif mapping_status(result) == "未确认" and (result.get("health") or {}).get("summary"):

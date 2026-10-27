@@ -76,6 +76,8 @@ class FakeAPI:
             return {"ok": True}
         elif action == "pin":
             mapping["pinned"] = body["pinned"]
+        elif action == "schedule":
+            mapping.update(body)
         elif action in {"start", "check"}:
             if action == "start" or mapping["status"] == "running":
                 mapping.update(status="running", health={"ok": False, "tunnel_ok": True, "target_ok": False},
@@ -389,7 +391,8 @@ class CLIHTTPTests(unittest.TestCase):
         with temp_directory() as directory, patch.object(Manager, "refresh_hosts", fake_refresh):
             manager = Manager(Path(directory), str(Path(directory) / "config"))
             try:
-                mapping = manager.create(payload(auto_start=True, pinned=True))
+                mapping = manager.create(payload(auto_start=True, pinned=True,
+                                                 daily_check_enabled=True, daily_check_time="08:15"))
                 self.server.manager = manager
                 expected = {key: mapping[key] for key in FIELDS}
                 for flag, value, field, saved_value in (
@@ -397,6 +400,8 @@ class CLIHTTPTests(unittest.TestCase):
                     ("--target-port", "50052", "target_port", 50052),
                     ("--name", "renamed", "name", "renamed"),
                     ("--no-auto-start", None, "auto_start", False),
+                    ("--no-daily-check", None, "daily_check_enabled", False),
+                    ("--daily-check-time", "23:30", "daily_check_time", "23:30"),
                 ):
                     args = ["mappings", "edit", mapping["id"], flag]
                     if value is not None:
