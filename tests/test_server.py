@@ -75,6 +75,10 @@ class FakeManager:
         self._record("set_schedule", mapping_id, payload)
         return {**self.mapping, **payload, "id": mapping_id}
 
+    def set_reconnect(self, mapping_id, payload):
+        self._record("set_reconnect", mapping_id, payload)
+        return {**self.mapping, **payload, "id": mapping_id}
+
 
 class ServerTests(unittest.TestCase):
     def setUp(self):
@@ -237,6 +241,37 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(data["status"], "running")
         self.assertEqual(data["daily_check_time"], "09:15")
         self.assertEqual(self.manager.calls, [("set_schedule", ("example", payload))])
+
+    def test_reconnect_setting_changes_live_without_stop(self):
+        self.manager.mapping["status"] = "running"
+        payload = {"auto_reconnect_enabled": False}
+        status, _, data = self.request("POST", "/api/mappings/example/reconnect", payload)
+        self.assertEqual(status, 200, data)
+        self.assertEqual(data["status"], "running")
+        self.assertIs(data["auto_reconnect_enabled"], False)
+        self.assertEqual(self.manager.calls, [("set_reconnect", ("example", payload))])
+
+    def test_reconnect_keeps_auth_origin_shutdown_and_route_guards(self):
+        path = "/api/mappings/example/reconnect"
+        payload = {"auto_reconnect_enabled": False}
+        for headers in ({}, {"X-Jumper-Token": "wrong-token"}):
+            status, _, _ = self.request("POST", path, payload, token=False, headers=headers)
+            self.assertEqual(status, 403)
+        status, _, _ = self.request("POST", path, payload, headers={"Origin": "https://example.com"})
+        self.assertEqual(status, 403)
+        for method, bad_path in (("PUT", path), ("DELETE", path), ("GET", path), ("POST", path + "/extra")):
+            status, _, _ = self.request(method, bad_path, payload if method != "GET" else None)
+            self.assertEqual(status, 404)
+        self.server.shutting_down = True
+        self.assertEqual(self.request("POST", path, payload)[0], 503)
+        self.assertEqual(self.manager.calls, [])
+
+    def test_reconnect_validation_and_save_errors_are_visible(self):
+        for error, expected in ((ValueError("invalid boolean"), 400), (KeyError("missing"), 404), (OSError("save failed"), 409)):
+            self.manager.failures["set_reconnect"] = error
+            status, _, body = self.request("POST", "/api/mappings/example/reconnect", {"auto_reconnect_enabled": True})
+            self.assertEqual(status, expected)
+            self.assertIn("error", body)
 
     def test_schedule_keeps_auth_origin_shutdown_and_route_guards(self):
         path = "/api/mappings/example/schedule"

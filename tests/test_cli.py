@@ -76,7 +76,7 @@ class FakeAPI:
             return {"ok": True}
         elif action == "pin":
             mapping["pinned"] = body["pinned"]
-        elif action == "schedule":
+        elif action in {"schedule", "reconnect"}:
             mapping.update(body)
         elif action in {"start", "check"}:
             if action == "start" or mapping["status"] == "running":

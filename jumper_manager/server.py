@@ -226,6 +226,8 @@ class Handler(BaseHTTPRequestHandler):
                     result = getattr(manager, action)(mapping_id)
                 elif self.command == "POST" and action == "schedule":
                     result = manager.set_schedule(mapping_id, body)
+                elif self.command == "POST" and action == "reconnect":
+                    result = manager.set_reconnect(mapping_id, body)
                 elif self.command == "POST" and action == "pin":
                     pinned = body.get("pinned")
                     if not isinstance(pinned, bool):

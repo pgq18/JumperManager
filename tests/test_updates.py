@@ -80,6 +80,20 @@ class UpdateActionsTests(unittest.TestCase):
             self.assertTrue(updates.windows_update(Path("app"), progress=Mock()))
             self.assertFalse(install.call_args.kwargs["wait"])
 
+    def test_check_progress_is_visible_in_terminal_but_keeps_json_clean(self):
+        for args in [["--check"], ["--check", "--json"]]:
+            output = io.StringIO()
+            def check(version, *, progress):
+                if progress:
+                    progress("正在通过官方发布页检查…")
+                return self.info()
+            with patch.object(updates, "check_release", side_effect=check), redirect_stdout(output):
+                self.assertEqual(updates.run(args, root=Path("app")), 0)
+            if "--json" in args:
+                self.assertTrue(json.loads(output.getvalue())["available"])
+            else:
+                self.assertIn("官方发布页", output.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

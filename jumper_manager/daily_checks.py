@@ -126,6 +126,9 @@ class DailyChecks:
                 raise RuntimeError("程序正在关闭，已取消启动。")
             if self._intent.get(mapping_id) != generation:
                 raise RuntimeError("此启动操作已被后续的停止或启动操作取消。")
+            recovery = getattr(self.manager, "_auto_reconnect", None)
+            if recovery is not None:
+                recovery.ensure_current(mapping_id)
             if revision is not None:
                 mapping = self.manager._mappings.get(mapping_id)
                 if self._revisions.get(mapping_id, 0) != revision or not mapping or not mapping.get("daily_check_enabled"):
@@ -288,6 +291,11 @@ class DailyChecks:
             if result.get("status") in {"running", "degraded", "starting"} and (result.get("health") or {}).get("tunnel_ok") is True:
                 self._finish(mapping_id, "ok", "每日检查完成：隧道未断开，无需重连。")
                 return
+            recovery = self.manager._auto_reconnect
+            if recovery.handles(mapping_id):
+                recovery.disconnected(mapping_id, "每日检查发现连接已断开。")
+                self._finish(mapping_id, "skipped", "每日检查发现断线；由自动重连处理，最多连续尝试 3 次。")
+                return
             try:
                 self.ensure_current(mapping_id, generation, revision)
                 self.manager._log(mapping_id, "warning", "每日检查发现隧道断开，正在重连一次。")
@@ -306,6 +314,7 @@ class DailyChecks:
                 self._finish(mapping_id, "failed", f"每日重连失败：{exc}；今天不再自动重试，下次按计划检查，也可手动启动。")
                 return
             self._finish(mapping_id, "reconnected", "每日检查发现断连，已重新启动隧道。")
+            recovery.started(mapping_id, generation)
         finally:
             if acquired:
                 lock.release()

@@ -22,6 +22,7 @@ class ProcessLoggingTests(unittest.TestCase):
         self.root = Path(self.directory.__enter__())
         self.manager = Manager.__new__(Manager)
         self.manager._closed = threading.Event()
+        self.manager._operation_context = threading.local()
         self.manager._lock = threading.RLock()
         self.manager._effective = {}
         self.manager._processes = {}

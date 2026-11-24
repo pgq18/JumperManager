@@ -139,6 +139,9 @@ ssh -N -L 8876:127.0.0.1:8876 manager-server
 | `./jumper-manager stop demo` | 停止单条映射，保留配置 |
 | `./jumper-manager mappings edit demo --target-port 50053` | 修改目标端口；先停止映射 |
 | `./jumper-manager mappings edit demo --ssh-timeout 120` | 将这条映射的 SSH 连接等待时间设为 120 秒；先停止映射 |
+| `./jumper-manager mappings reconnect demo` | 查看断线自动重连开关与重试结果 |
+| `./jumper-manager mappings reconnect demo --no-auto-reconnect` | 关闭断线自动重连；已启动时也可设置 |
+| `./jumper-manager mappings reconnect demo --auto-reconnect` | 开启断线自动重连；不会立即启动停止的映射 |
 | `./jumper-manager mappings schedule demo` | 查看每日检查配置、下次时间及最近结果 |
 | `./jumper-manager mappings schedule demo --daily-check --daily-check-time 09:00` | 开启每天 09:00 检查，断连时自动重连；已启动时也可设置 |
 | `./jumper-manager mappings schedule demo --no-daily-check` | 关闭这条映射的每日检查，保持当前连接 |
@@ -159,10 +162,11 @@ ssh -N -L 8876:127.0.0.1:8876 manager-server
 | `--target-address` | 相对于目标设备解析的服务地址，默认 `127.0.0.1` |
 | `--ssh-timeout` | 此映射的 SSH 连接等待时间，5–600 秒的整数，默认 30 秒；同样应用于跳板连接 |
 | `--auto-start` / `--no-auto-start` | 开启或关闭“管理器启动时自动建立此映射” |
+| `--auto-reconnect` / `--no-auto-reconnect` | 开启或关闭断线自动重连；默认开启，每次断连最多重试 3 次 |
 | `--daily-check` / `--no-daily-check` | 开启或关闭每日检查，断连时自动重连；默认关闭 |
 | `--daily-check-time` | 每天检查时间，严格使用 `HH:MM`，如 `09:00`；默认 `09:00`，使用管理器本地时间 |
 
-`add` 需要两端设备和端口，建议同时用 `--name` 设置便于识别的名称；`edit` 只传要修改的字段。编辑映射不会重置它的置顶状态或未指定的每日检查设置。只指定 `--daily-check-time` 不会改变每日检查的开关。
+`add` 需要两端设备和端口，建议同时用 `--name` 设置便于识别的名称；`edit` 只传要修改的字段。编辑映射不会重置它的置顶状态或未指定的每日检查和自动重连设置。只指定 `--daily-check-time` 不会改变每日检查的开关。
 
 WebUI 的新建、编辑窗口中，展开“高级设置”也可以设置“SSH 连接等待时间（秒）”，两端设置同步保存。这个时间按每次 SSH 连接计算，启动或检查的总耗时可能更长；目标服务仍然可以在映射启动后再启动。
 
@@ -184,6 +188,26 @@ WebUI 的新建、编辑窗口中，展开“高级设置”也可以设置“SS
 ```
 
 `logs` 不带映射标识时读取服务日志，也可以写成 `logs --server`；指定映射标识时读取该映射的日志。服务日志在管理器停止后也可读取。`--json` 可放在命令最后，适合脚本处理；命令帮助可通过 `./jumper-manager --help` 或相应子命令的 `--help` 查看。
+
+## 断线自动重连
+
+每条映射默认开启。成功启动后会自动检测断连，发现断连后每隔 **5 秒**尝试重连；一次尝试耗时仍受该映射的 SSH 连接等待设置影响。连续 **3 次失败**后停止尝试，显示“已断开”，需要手动启动。成功恢复后重新监测，下一次断连重新计算次数。
+
+```sh
+# 查看设置及当前重试结果
+./jumper-manager mappings reconnect demo
+
+# 关闭或开启；无需先停止映射
+./jumper-manager mappings reconnect demo --no-auto-reconnect
+./jumper-manager mappings reconnect demo --auto-reconnect
+
+# 排查问题后手动启动，重新开始监测
+./jumper-manager start demo
+```
+
+`list` 显示自动重连状态，`mappings show demo` 显示原因，`--json` 包含 `auto_reconnect` 详情。WebUI 在“高级设置”及映射详情中提供相同的开关。
+
+重连中可以用 `stop demo` 取消。**手动停止、目标服务未启动都不会触发自动重连。** 3 次失败后，每日检查和管理器重启也不会继续拉起；重新切换开关不会清空次数，需要手动启动。修改了相关 SSH 配置会暂停自动重连，先确认设备路径再手动启动。初次启动失败不会自动重试。
 
 ## 每日检查与断线重连
 
@@ -207,7 +231,7 @@ WebUI 的新建、编辑窗口中，展开“高级设置”也可以设置“SS
 
 WebUI 中，新建或编辑映射时展开“高级设置”，可以设置“每日检查并自动重连”和“每天检查时间”。已有映射可点击列表里的时钟按钮“每日检查”直接调整。`list` 显示各条映射是否开启，`mappings show` 或 `mappings schedule` 显示下次检查及最近结果；详细记录通过 `logs demo` 查看。
 
-每天到点检查一次：SSH 连接或端口转发断开时重新建立映射，连接正常则保留。**目标服务未启动不会被当成断连，也不会因此重建映射。** 重连失败会记录原因，当天不会反复重试；可以排查后手动启动，或等待次日检查。
+每天到点检查一次：SSH 连接或端口转发断开时重新建立映射，连接正常则保留。**目标服务未启动不会被当成断连，也不会因此重建映射。** 每日检查和自动重连不会同时重复启动同一条映射。连续 3 次重连失败后，每日检查也不会再次尝试，需手动启动。关闭断线自动重连时，每日检查仍按原设置每天最多重连一次。
 
 修改了相关 SSH 配置后，自动重连会暂停。确认设备路径后，手动停止并重新启动这条映射即可恢复。
 
@@ -284,7 +308,7 @@ source-device 的 127.0.0.1:50052
 
 更新包来自本项目的 GitHub Releases，下载完成后会核对 SHA-256。检查、下载和校验期间，现有映射继续运行；安装时需要短暂中断。完成后保留 `data/`、SSH 配置、映射顺序和自启设置，并恢复更新前已启动的映射。管理器原本停止时，更新后仍然停止。使用 `systemd --user` 管理的实例继续通过原用户服务启动。
 
-下载或校验失败不会停止现有管理器。安装失败时保留或恢复原程序；可根据命令输出查看原因并重试。更新需要安装目录可写，且当前用户能够访问 GitHub；使用代理时可在终端配置 `HTTPS_PROXY`。不要通过 `sudo` 更新另一位用户正在运行的实例。
+下载或校验失败不会停止现有管理器。安装失败时保留或恢复原程序；可根据命令输出查看原因并重试。更新需要安装目录可写，且当前用户能够访问 GitHub；检查和下载遇到临时网络错误会自动重试；GitHub 接口不可达或限流时尝试本仓库的官方发布页。程序遵循系统及环境代理，代理连接失败时也会尝试直连，仍只从官方 GitHub 下载并校验文件。使用代理时可在终端配置 `HTTPS_PROXY`，例如 `HTTPS_PROXY=http://127.0.0.1:7897 ./jumper-manager update --check`（请替换成实际代理端口）。所有方式均不可达时，仍需恢复网络或代理后再试。不要通过 `sudo` 更新另一位用户正在运行的实例。
 
 自动安装用于官方独立程序。通过源码启动的用户可以检查版本，需要按[源码说明](../SOURCE-LINUX.md)更新源码并重新构建。
 

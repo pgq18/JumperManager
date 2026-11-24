@@ -38,7 +38,7 @@ def _message(message, *, question=False, error=False):
 def windows_update(root: Path, *, progress):
     """Called off the tray event loop. Return True after installer handoff."""
     try:
-        info = check_release(__version__)
+        info = check_release(__version__, progress=progress)
         if not info.available:
             _message(f"没有可用的新版本。\n\n当前版本：{__version__}\n最新正式版本：{info.version}")
             return False
@@ -70,7 +70,7 @@ def windows_update(root: Path, *, progress):
             raise UpdateError("更新尚未完成，请查看 data/updates 中的更新状态；不要重复启动安装。")
         return True
     except Exception as error:
-        LOG.exception("Software update failed")
+        LOG.error("Software update failed: %s", error)
         _message(f"更新未完成：{error}\n\n可稍后从托盘菜单重试。", error=True)
         return False
 
@@ -81,8 +81,9 @@ def run(argv, *, root):
     parser.add_argument("--check", action="store_true", help="只检查版本，不下载或安装")
     parser.add_argument("--json", action="store_true", help="输出 JSON 结果")
     args = parser.parse_args(argv)
+    progress = None if args.json else lambda message: print(message, flush=True)
     try:
-        info = check_release(__version__)
+        info = check_release(__version__, progress=progress)
         result = {**info.to_dict(), "updated": False, "action": "check" if args.check else "update"}
         if args.check or not info.available:
             if args.json:
@@ -91,7 +92,6 @@ def run(argv, *, root):
                 print(f"当前版本：{__version__}；最新正式版本：{info.version}")
                 print("发现新版本，运行 ./jumper-manager update 安装。" if info.available else "没有可用的新版本。")
             return 0
-        progress = None if args.json else lambda message: print(message, flush=True)
         if progress:
             progress(f"正在更新到 {info.version}；配置会保留，已启动的映射会在重启后恢复。")
         installed = install_release(info, Path(root), progress=progress, wait=True)

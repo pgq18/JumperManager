@@ -39,7 +39,7 @@
     arrowUp: ["M12 20V4 M5 11l7-7 7 7"],
     arrowDown: ["M12 4v16 M5 13l7 7 7-7"],
   };
-  const STATUS = { stopped: "已停止", starting: "启动中", stopping: "停止中", started: "已启动", unavailable: "异常", start_failed: "启动失败", unchecked: "未检查", unconfirmed: "未确认" };
+  const STATUS = { stopped: "已停止", starting: "启动中", stopping: "停止中", reconnecting: "重连中", disconnected: "已断开", started: "已启动", unavailable: "异常", start_failed: "启动失败", unchecked: "未检查", unconfirmed: "未确认" };
   const ROLES = { source: "访问入口", relay: "本机", local: "本机", gateway: "中间设备", jump: "中间设备", target: "目标服务", destination: "目标服务" };
   const state = {
     data: { hosts: [], mappings: [], ssh_config: "" }, token: null, sessionPromise: null,
@@ -47,7 +47,7 @@
     connected: false, closed: false, refreshing: false, editing: null, previewKey: null,
     previewRequest: 0, formBusy: false, confirmResolver: null, renderSignature: "", graphSignature: "",
     dragging: null, orderBusy: false, orderRevision: 0, refreshAgain: false,
-    scheduleEditing: null, scheduleBusy: false,
+    scheduleEditing: null, scheduleBusy: false, reconnectBusy: new Set(),
   };
 
   function el(tag, className, text) {
@@ -98,6 +98,10 @@
     return date.toLocaleString("zh-CN", full ? { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false } : { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
   }
   function mappingStatus(mapping) {
+    if (!["stopped", "stopping"].includes(mapping.status)) {
+      if (isReconnecting(mapping)) return "reconnecting";
+      if (mapping.auto_reconnect?.state === "exhausted") return "disconnected";
+    }
     if (["stopped", "starting", "stopping"].includes(mapping.status)) return mapping.status;
     if (mapping.status === "error" && mapping.failure_stage === "start") return "start_failed";
     if (mapping.error || mapping.config_changed || mapping.status === "error") return "unavailable";
@@ -107,7 +111,8 @@
     return !health && !mapping.last_checked ? "unchecked" : "unconfirmed";
   }
   function isStarted(mapping) { return mappingStatus(mapping) === "started"; }
-  function needsAttention(mapping) { return ["unavailable", "start_failed"].includes(mappingStatus(mapping)); }
+  function isReconnecting(mapping) { return ["waiting", "reconnecting"].includes(mapping.auto_reconnect?.state); }
+  function needsAttention(mapping) { return ["unavailable", "start_failed", "disconnected"].includes(mappingStatus(mapping)); }
   function clientUsageSummary(mapping) {
     const usage = mapping.usage;
     const count = Number.isInteger(usage?.active_connections) && usage.active_connections >= 0 ? usage.active_connections : null;
@@ -123,6 +128,7 @@
   }
   function addressLabel(address, port) { return `${String(address).includes(":") && !String(address).startsWith("[") ? `[${address}]` : address}:${port}`; }
   function unavailableReason(mapping) {
+    if (["exhausted", "blocked"].includes(mapping.auto_reconnect?.state) && mapping.auto_reconnect.message) return mapping.auto_reconnect.message;
     if (mapping.status === "error" && mapping.failure_stage === "start" && mapping.error) return String(mapping.error).split(/\r?\n/).find((line) => line.trim())?.trim() || "启动失败，请展开“诊断详情”查看原因。";
     if (mapping.config_changed) return "设备配置已更改，请停止后重新启动此映射。";
     if (mapping.error) return String(mapping.error).split(/\r?\n/).find((line) => line.trim())?.trim() || "映射发生异常，请展开“诊断详情”查看原因。";
@@ -141,7 +147,8 @@
     if (action === "stop") return mapping.status === "stopped" ? { message: `已停止「${mapping.name}」`, neutral: true } : { message: "映射未能停止，请展开“诊断详情”查看原因。", error: true };
     if (status === "started") return { message: `${action === "start" ? `「${mapping.name}」启动成功` : "检查已完成"}。${targetProcessSummary(mapping).text}。`, neutral: true };
     if (status === "start_failed") return { message: `「${mapping.name}」启动失败：${unavailableReason(mapping)}`, error: true };
-    if (status === "unavailable") return { message: `「${mapping.name}」发生异常：${unavailableReason(mapping)}`, error: true };
+    if (status === "unavailable" || status === "disconnected") return { message: `「${mapping.name}」${status === "disconnected" ? "已断开" : "发生异常"}：${unavailableReason(mapping)}`, error: true };
+    if (status === "reconnecting") return { message: mapping.auto_reconnect?.message || "正在重连，请稍候；可点击“停止”取消。", neutral: true };
     if (status === "stopped") return { message: "映射尚未启动，未执行检查。请先启动映射。", neutral: true };
     return { message: `检查尚未完成。${targetProcessSummary(mapping).text}。`, neutral: true };
   }
@@ -443,13 +450,14 @@
       const label = busy ? { start: "正在启动…", stop: "正在停止…", check: "正在检查…", delete: "正在删除…" }[busy] : usage.checkedAt ? `进程快照 ${formatTime(usage.checkedAt)} · 启动/检查时更新` : "尚未检查进程 · 启动或检查时更新";
       bottom.append(el("span", "mapping-meta", label));
       const actions = el("div", "mapping-actions");
-      const active = ["running", "starting", "degraded", "stopping"].includes(mapping.status);
+      const recovering = isReconnecting(mapping);
+      const active = recovering || ["running", "starting", "degraded", "stopping"].includes(mapping.status);
       const toggle = button(active ? "停止" : "启动", busy === "start" || busy === "stop" ? "refresh" : active ? "stop" : "play", `button small ${active ? "secondary" : "primary"}${busy === "start" || busy === "stop" ? " spin" : ""}`, () => mappingAction(mapping, active ? "stop" : "start"));
-      toggle.disabled = state.orderBusy || !!busy || ["starting", "stopping"].includes(mapping.status);
+      toggle.disabled = state.orderBusy || !!busy || (!recovering && ["starting", "stopping"].includes(mapping.status));
       const check = button("检查", busy === "check" ? "refresh" : "activity", `button small ghost${busy === "check" ? " spin" : ""}`, () => mappingAction(mapping, "check"));
-      check.disabled = state.orderBusy || !!busy || ["starting", "stopping"].includes(mapping.status);
+      check.disabled = state.orderBusy || !!busy || recovering || ["starting", "stopping"].includes(mapping.status);
       const edit = button("", "edit", "icon-button", () => openMappingDialog(mapping), active ? "先停止映射再编辑" : "编辑映射");
-      edit.disabled = state.orderBusy || !!busy || !["stopped", "error"].includes(mapping.status);
+      edit.disabled = state.orderBusy || !!busy || recovering || !["stopped", "error"].includes(mapping.status);
       const remove = button("", "trash", "icon-button", () => deleteMapping(mapping), active ? "先停止映射再删除" : "删除映射");
       remove.disabled = state.orderBusy || !!busy || active;
       const schedule = button("", "clock", `icon-button schedule-button${mapping.daily_check_enabled === true ? " is-enabled" : ""}`, () => openScheduleDialog(mapping), "每日检查");
@@ -469,6 +477,7 @@
       order.append(pin, up, down);
       const tools = el("div", "mapping-row-tools"); tools.append(actions, order); bottom.append(tools);
       row.append(top, endpoints, snapshot);
+      if (recovering) row.append(el("p", "mapping-notice", mapping.auto_reconnect?.message || "已断开，正在尝试重新连接。"));
       if (needsAttention(mapping)) row.append(el("p", "mapping-unavailable", unavailableReason(mapping)));
       row.append(bottom);
       list.append(row);
@@ -500,6 +509,18 @@
     usageBox.append(el("p", "usage-timestamp", usage.checkedAt ? `采样于 ${formatTime(usage.checkedAt, true)}` : "尚无进程快照"));
     usageBox.append(el("small", "", "启动或检查时更新，包含每日检查。统计目标端口的监听进程，不按客户端连接数量计算。"));
     container.append(usageBox);
+    const recovery = mapping.auto_reconnect || {};
+    const reconnect = el("section", "reconnect-details");
+    const reconnectHeading = el("div", "schedule-detail-heading");
+    const enabled = mapping.auto_reconnect_enabled !== false;
+    const reconnectToggle = button(enabled ? "关闭" : "开启", "refresh", "text-button", () => toggleReconnect(mapping), enabled ? "关闭断线自动重连" : "开启断线自动重连");
+    reconnectToggle.disabled = state.reconnectBusy.has(mapping.id);
+    reconnectToggle.setAttribute("aria-pressed", String(enabled));
+    reconnectHeading.append(el("h4", "detail-section-label", "断线自动重连"), reconnectToggle);
+    reconnect.append(reconnectHeading, el("p", "schedule-help", `${enabled ? "已开启" : "已关闭"} · 断连后每隔 5 秒重试，连续失败 3 次后停止。`));
+    if (recovery.message) reconnect.append(el("p", `schedule-result${recovery.state === "exhausted" ? " failed" : ""}`, recovery.message));
+    if (recovery.next_retry) reconnect.append(el("p", "schedule-help", `下次尝试 ${formatTime(recovery.next_retry)}`));
+    container.append(reconnect);
     if (mapping.daily_check_enabled === true) {
       const schedule = mapping.scheduled_check || {};
       const section = el("section", "schedule-details");
@@ -555,6 +576,7 @@
     return match ? `${match[1]} ${match[2]}` : String(value || "");
   }
   function scheduleNextRun(mapping) {
+    if (mapping.auto_reconnect?.state === "exhausted") return "自动重连已失败 3 次；请排查后手动启动。";
     const schedule = mapping.scheduled_check || {};
     if (schedule.next_run) return `下次检查 ${scheduleLocalTime(schedule.next_run)}`;
     if (schedule.eligible === false) return "当前不安排检查；启动映射后生效。";
@@ -614,6 +636,18 @@
       void refreshState();
     } catch (error) { $("scheduleError").textContent = error.message; $("scheduleError").hidden = false; }
     finally { setScheduleBusy(false); }
+  }
+
+  async function toggleReconnect(mapping) {
+    if (state.reconnectBusy.has(mapping.id)) return;
+    state.reconnectBusy.add(mapping.id); renderDetails();
+    try {
+      const updated = await api(`/api/mappings/${encodeURIComponent(mapping.id)}/reconnect`, "POST", { auto_reconnect_enabled: mapping.auto_reconnect_enabled === false });
+      const index = state.data.mappings.findIndex((item) => item.id === mapping.id);
+      if (index >= 0) state.data.mappings[index] = updated;
+      showToast(updated.auto_reconnect_enabled ? "已开启断线自动重连；停止的映射请手动启动。" : "已关闭断线自动重连。");
+    } catch (error) { showToast(error.message, true); }
+    finally { state.reconnectBusy.delete(mapping.id); state.renderSignature = ""; render(); void refreshState(); }
   }
 
   async function mappingAction(mapping, action) {
@@ -811,7 +845,7 @@
   function drawNode(svg, info) {
     const { x, y, host, role, port, step, status, titleOverride } = info;
     const local = host === "local"; const h = hostById(host) || { id: host, alias: host, hostname: host };
-    const unavailable = ["unavailable", "start_failed"].includes(status);
+    const unavailable = ["unavailable", "start_failed", "disconnected"].includes(status);
     const palette = unavailable ? { bg: "#2b1d24", border: "#75414b", tile: "#402731", icon: "#f08c8d", dot: "#f08c8d" } : { bg: "#162333", border: "#30435b", tile: "#213348", icon: "#8aabce", dot: "#8191a7" };
     const group = svgEl("g", { class: `graph-node${local ? " local" : ""}${status ? ` ${status}` : ""}`, transform: `translate(${x - GRAPH.nodeWidth / 2},${y - GRAPH.nodeHeight / 2})`, tabindex: "0", role: "button", "aria-label": `查看设备 ${hostLabel(host)}${port ? `，端口 ${port}` : ""}${status ? `，映射${STATUS[status]}` : ""}` });
     const fittedLabels = [];
@@ -933,6 +967,7 @@
     $("formTargetAddress").value = mapping?.target_address || "127.0.0.1";
     $("formAutoStart").checked = mapping?.auto_start === true;
     $("formDailyCheckEnabled").checked = mapping?.daily_check_enabled === true;
+    $("formAutoReconnect").checked = mapping?.auto_reconnect_enabled !== false;
     $("formDailyCheckTime").value = mapping?.daily_check_time || "09:00";
     $("formDailyCheckTime").dataset.savedTime = $("formDailyCheckTime").value;
     syncScheduleTime("formDailyCheckEnabled", "formDailyCheckTime");
@@ -971,7 +1006,7 @@
     const source = $("formSourceHost").value, target = $("formTargetHost").value, targetAddress = $("formTargetAddress").value.trim();
     if (!source || !target) throw new Error("请选择来源设备和目标设备。");
     if (!targetAddress) throw new Error("请填写目标设备上的服务地址。");
-    return { name: $("formName").value.trim() || `${hostLabel(source)} → ${hostLabel(target)} · ${sourcePort}`, source_host: source, source_port: sourcePort, target_host: target, target_port: targetPort, ssh_timeout: sshTimeout, bind_address: $("formBindAddress").value, target_address: targetAddress, auto_start: $("formAutoStart").checked, ...schedulePayload("formDailyCheckEnabled", "formDailyCheckTime") };
+    return { name: $("formName").value.trim() || `${hostLabel(source)} → ${hostLabel(target)} · ${sourcePort}`, source_host: source, source_port: sourcePort, target_host: target, target_port: targetPort, ssh_timeout: sshTimeout, bind_address: $("formBindAddress").value, target_address: targetAddress, auto_start: $("formAutoStart").checked, auto_reconnect_enabled: $("formAutoReconnect").checked, ...schedulePayload("formDailyCheckEnabled", "formDailyCheckTime") };
   }
   function invalidatePreview() { state.previewKey = null; state.previewRequest++; $("saveMappingButton").disabled = true; $("previewPanel").hidden = true; }
   function showFormError(message) { $("formError").textContent = message; $("formError").hidden = false; }

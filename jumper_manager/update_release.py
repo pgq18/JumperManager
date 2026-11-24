@@ -7,12 +7,15 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import hashlib
+from http.client import HTTPException, IncompleteRead
 import json
 import os
 from pathlib import Path
 import platform
 import re
 import shutil
+import socket
+import ssl
 import stat
 import struct
 import sys
@@ -22,7 +25,7 @@ import time
 from typing import Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener, getproxies
 import zipfile
 
 
@@ -34,6 +37,7 @@ MAX_EXPANDED_BYTES = 512 * 1024 * 1024
 MAX_METADATA_BYTES = 2 * 1024 * 1024
 MAX_CHECKSUM_BYTES = 256 * 1024
 NETWORK_TIMEOUT = 30
+NETWORK_ATTEMPTS = 3
 DOWNLOAD_TIMEOUT = 20 * 60
 _HOSTS = frozenset({"api.github.com", "github.com", "release-assets.githubusercontent.com",
                     "objects.githubusercontent.com", "github-releases.githubusercontent.com"})
@@ -120,13 +124,17 @@ class _GitHubRedirects(HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-def _open(url: str):
+def _open(url: str, *, direct=False, method="GET"):
     _transport_url(url)
     headers = {"User-Agent": "JumperManager-Updater", "Accept-Encoding": "identity"}
     if url == API_URL:
         headers.update(Accept="application/vnd.github+json", **{"X-GitHub-Api-Version": "2022-11-28"})
-    # Default ProxyHandler deliberately honors system/environment proxy settings.
-    response = build_opener(_GitHubRedirects()).open(Request(url, headers=headers), timeout=NETWORK_TIMEOUT)
+    # Read proxies afresh: tray applications can outlive changes to Windows'
+    # proxy settings. Direct fallback never changes process-wide networking.
+    handlers = [_GitHubRedirects()]
+    if direct:
+        handlers.append(ProxyHandler({}))
+    response = build_opener(*handlers).open(Request(url, headers=headers, method=method), timeout=NETWORK_TIMEOUT)
     try:
         _transport_url(response.geturl())
     except Exception:
@@ -135,23 +143,88 @@ def _open(url: str):
     return response
 
 
-def _fetch_bytes(url: str, limit: int) -> bytes:
-    with _open(url) as response:
-        content = response.read(limit + 1)
-    if len(content) > limit:
-        raise UpdateError("更新服务器返回的数据过大。")
-    return content
+def _certificate_error(exc):
+    reason = exc.reason if isinstance(exc, URLError) else exc
+    return isinstance(reason, (ssl.SSLCertVerificationError, ssl.CertificateError))
+
+
+def _retryable(exc):
+    if _certificate_error(exc):
+        return False
+    if isinstance(exc, HTTPError):
+        # Rate limits can last an hour. Switch metadata channels instead of
+        # hammering the same API; never sleep for an unbounded Retry-After.
+        return exc.code in {408, 425, 500, 502, 503, 504}
+    return isinstance(exc, (URLError, TimeoutError, ConnectionError, HTTPException, socket.gaierror))
+
+
+def _proxy_failure(exc):
+    return (_retryable(exc) and not isinstance(exc, HTTPError)) or (
+        isinstance(exc, HTTPError) and exc.code == 407)
+
+
+def _request(operation, progress=None):
+    """Retry a complete read, so a reset after headers is retryable too."""
+    proxies = getproxies()
+    can_go_direct = bool(proxies.get("https") or proxies.get("http"))
+    direct = False
+    for attempt in range(NETWORK_ATTEMPTS):
+        try:
+            return operation(direct)
+        except Exception as exc:
+            switch_route = can_go_direct and _proxy_failure(exc)
+            if isinstance(exc, HTTPError):
+                exc.close()
+            if attempt == NETWORK_ATTEMPTS - 1 or not (_retryable(exc) or switch_route):
+                raise
+            if switch_route:
+                direct = not direct
+            if progress:
+                route = "尝试直接连接" if direct else "重新连接"
+                progress(f"网络暂时不可用，{route}（第 {attempt + 2}/{NETWORK_ATTEMPTS} 次）…")
+            time.sleep(attempt + 1)
+
+
+def _response(url, direct, *, method="GET"):
+    # Keep the common call simple for injected transports and embedders.
+    if not direct and method == "GET":
+        return _open(url)
+    return _open(url, direct=direct, method=method)
+
+
+def _fetch_bytes(url: str, limit: int, progress=None) -> bytes:
+    def read(direct):
+        with _response(url, direct) as response:
+            content = response.read(limit + 1)
+            length = response.headers.get("Content-Length")
+        if len(content) > limit:
+            raise UpdateError("更新服务器返回的数据过大。")
+        if length is not None:
+            try:
+                expected = int(length)
+            except ValueError as exc:
+                raise UpdateError("更新服务器返回了无效的文件长度。") from exc
+            if expected != len(content):
+                raise IncompleteRead(content, expected - len(content))
+        return content
+    return _request(read, progress)
 
 
 def _network_error(exc: Exception) -> UpdateError:
+    # urllib exceptions may contain proxy credentials or signed download URLs.
+    # Do not put their raw repr/str in dialogs, terminal output, or logs.
+    if _certificate_error(exc):
+        return UpdateError("无法验证 GitHub 的 HTTPS 证书。请检查系统时间、系统证书或代理的证书设置；未关闭证书校验。")
     if isinstance(exc, HTTPError):
         if exc.code in {403, 429}:
             return UpdateError("GitHub 暂时限制了更新请求，请稍后重试。")
         if exc.code == 404:
             return UpdateError("暂时找不到正式版更新或下载文件，请稍后重试。")
+        if exc.code == 407:
+            return UpdateError("网络代理要求认证，请检查系统代理或 HTTPS_PROXY 的认证设置后重试。")
         return UpdateError(f"检查或下载更新失败：GitHub HTTP {exc.code}。")
-    if isinstance(exc, (TimeoutError, URLError)):
-        return UpdateError(f"无法连接 GitHub，请检查网络或系统代理后重试：{exc}")
+    if isinstance(exc, (URLError, TimeoutError, ConnectionError, HTTPException, socket.gaierror)):
+        return UpdateError("无法连接 GitHub，或下载连接中断。已尝试重连；请确认系统代理正在运行，Linux 可设置 HTTPS_PROXY，然后重试。也可从官方发布页手动下载。")
     return UpdateError(f"无法准备更新：{exc}")
 
 
@@ -198,17 +271,72 @@ def _release_info(data: object, current: str, platform_name: str) -> ReleaseInfo
                        asset["browser_download_url"], checksums["browser_download_url"], size, digest, notes)
 
 
-def check_release(current_version: str, platform_name: str | None = None) -> ReleaseInfo:
+def _page_release(current: str, platform_name: str, progress=None) -> ReleaseInfo:
+    """Official release-page channel, independent of the REST API quota.
+
+    GitHub documents /releases/latest as its latest-release link. Resolve that
+    link once, pin every subsequent request to the same stable tag, and require
+    the published checksum before offering an update.
+    """
+    def headers(url):
+        def read(direct):
+            try:
+                response = _response(url, direct, method="HEAD")
+            except HTTPError as exc:
+                if exc.code not in {405, 501}:
+                    raise
+                exc.close()
+                response = _response(url, direct)
+            with response:
+                return response.geturl(), response.headers.get("Content-Length")
+        return _request(read, progress)
+
+    release_url, _ = headers(RELEASE_ROOT + "/latest")
+    prefix = RELEASE_ROOT + "/tag/"
+    if not release_url.startswith(prefix):
+        raise UpdateError("官方发布页未指向本项目的正式版本，已取消检查。")
+    tag = release_url.removeprefix(prefix)
+    _version(tag, stable=True)
+    version = tag.removeprefix("v")
+    name = _ASSETS[platform_name][0]
+    asset_url = _asset_url(tag, name)
+    checksums_url = _asset_url(tag, "SHA256SUMS.txt")
+    expected = _checksum(_fetch_bytes(checksums_url, MAX_CHECKSUM_BYTES, progress), name)
+    _, raw_size = headers(asset_url)
+    try:
+        size = int(raw_size)
+    except (ValueError, TypeError) as exc:
+        raise UpdateError("官方发布页的下载文件缺少有效大小，无法安全准备更新。") from exc
+    if not 0 < size <= MAX_ASSET_BYTES:
+        raise UpdateError("下载文件大小无效或超出限制。")
+    return ReleaseInfo(version, current, _is_newer(version, current), release_url,
+                       name, asset_url, checksums_url, size, expected)
+
+
+def check_release(current_version: str, platform_name: str | None = None, *, progress=None) -> ReleaseInfo:
     """Check the latest official stable release; never offer a downgrade."""
     _version(current_version)
     selected_platform = _platform_name(platform_name)
     try:
-        data = json.loads(_fetch_bytes(API_URL, MAX_METADATA_BYTES))
+        if progress:
+            progress("正在检查最新正式版本…")
+        content = (_fetch_bytes(API_URL, MAX_METADATA_BYTES, progress) if progress
+                   else _fetch_bytes(API_URL, MAX_METADATA_BYTES))
+        data = json.loads(content)
         return _release_info(data, current_version, selected_platform)
     except UpdateError:
         raise
-    except (OSError, ValueError, TypeError) as exc:
-        raise _network_error(exc) from exc
+    except (OSError, HTTPException, ValueError, TypeError) as exc:
+        if _certificate_error(exc):
+            raise _network_error(exc) from None
+        if progress:
+            progress("GitHub 更新接口暂不可用，正在通过官方发布页检查…")
+        try:
+            return _page_release(current_version, selected_platform, progress)
+        except UpdateError:
+            raise
+        except (OSError, HTTPException, ValueError, TypeError) as fallback:
+            raise _network_error(fallback) from None
 
 
 def _validate_info(info: ReleaseInfo) -> str:
@@ -251,37 +379,50 @@ def _checksum(content: bytes, asset_name: str) -> str:
 
 
 def _download(info: ReleaseInfo, destination: Path, progress: Callable[[str], None] | None) -> str:
-    digest = hashlib.sha256()
-    count, last_report = 0, 0.0
     deadline = time.monotonic() + DOWNLOAD_TIMEOUT
-    with _open(info.asset_url) as response, destination.open("xb") as output:
-        header = response.headers.get("Content-Length")
-        if header is not None:
-            try:
-                length = int(header)
-            except ValueError as exc:
-                raise UpdateError("下载服务器返回了无效的文件长度。") from exc
-            if length != info.asset_size:
-                raise UpdateError("下载文件长度与发布信息不一致。")
-        while True:
-            if time.monotonic() > deadline:
-                raise UpdateError("下载更新超时，请检查网络后重试。")
-            chunk = response.read(1024 * 1024)
-            if not chunk:
-                break
-            count += len(chunk)
-            if count > info.asset_size:
-                raise UpdateError("下载文件超过发布信息中的大小。")
-            output.write(chunk)
-            digest.update(chunk)
-            if progress and (time.monotonic() - last_report >= 1 or count == info.asset_size):
-                progress(f"正在下载 {info.version}：{count * 100 // info.asset_size}%")
-                last_report = time.monotonic()
-        if count != info.asset_size:
-            raise UpdateError("更新文件下载不完整，请重试。")
-        output.flush()
-        os.fsync(output.fileno())
-    return digest.hexdigest()
+
+    def download(direct):
+        digest = hashlib.sha256()
+        count, last_report = 0, 0.0
+        created = False
+        try:
+            with _response(info.asset_url, direct) as response, destination.open("xb") as output:
+                created = True
+                header = response.headers.get("Content-Length")
+                if header is not None:
+                    try:
+                        length = int(header)
+                    except ValueError as exc:
+                        raise UpdateError("下载服务器返回了无效的文件长度。") from exc
+                    if length != info.asset_size:
+                        raise UpdateError("下载文件长度与发布信息不一致。")
+                while True:
+                    if time.monotonic() > deadline:
+                        raise UpdateError("下载更新超时，请检查网络后重试。")
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    count += len(chunk)
+                    if count > info.asset_size:
+                        raise UpdateError("下载文件超过发布信息中的大小。")
+                    output.write(chunk)
+                    digest.update(chunk)
+                    if progress and (time.monotonic() - last_report >= 1 or count == info.asset_size):
+                        progress(f"正在下载 {info.version}：{count * 100 // info.asset_size}%")
+                        last_report = time.monotonic()
+                if count != info.asset_size:
+                    raise IncompleteRead(b"", info.asset_size - count)
+                output.flush()
+                os.fsync(output.fileno())
+            return digest.hexdigest()
+        except Exception:
+            # Never append to a partial archive, and never remove a file that
+            # pre-existed this request. Each retry starts from an empty file.
+            if created:
+                destination.unlink(missing_ok=True)
+            raise
+
+    return _request(download, progress)
 
 
 def _member_name(name: str, seen: set[str]) -> None:
@@ -423,7 +564,7 @@ def stage_release(info: ReleaseInfo, staging_dir: Path,
         work = Path(tempfile.mkdtemp(prefix="release-", dir=staging_dir))
         if progress:
             progress(f"正在下载并校验 {info.version}…")
-        expected = _checksum(_fetch_bytes(info.checksums_url, MAX_CHECKSUM_BYTES), info.asset_name)
+        expected = _checksum(_fetch_bytes(info.checksums_url, MAX_CHECKSUM_BYTES, progress), info.asset_name)
         if info.expected_digest and expected != info.expected_digest.lower():
             raise UpdateError("发布信息与 SHA256SUMS.txt 中的校验值不一致，已取消更新。")
         archive = work / info.asset_name
@@ -441,6 +582,6 @@ def stage_release(info: ReleaseInfo, staging_dir: Path,
             shutil.rmtree(work, ignore_errors=True)
         if isinstance(exc, UpdateError):
             raise
-        if isinstance(exc, (OSError, ValueError, RuntimeError, EOFError, tarfile.TarError, zipfile.BadZipFile)):
-            raise _network_error(exc) from exc
+        if isinstance(exc, (OSError, HTTPException, ValueError, RuntimeError, EOFError, tarfile.TarError, zipfile.BadZipFile)):
+            raise _network_error(exc) from None
         raise

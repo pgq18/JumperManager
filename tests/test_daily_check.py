@@ -32,7 +32,7 @@ class DailyCheckTests(unittest.TestCase):
         self.temp.__exit__(None, None, None)
 
     def create_started(self, **changes):
-        mapping = self.manager.create(payload(daily_check_enabled=True, **changes))
+        mapping = self.manager.create(payload(daily_check_enabled=True, auto_reconnect_enabled=False, **changes))
         mapping_id = mapping["id"]
         with patch.object(self.manager, "_start_mapping", side_effect=lambda *args: self.healthy(mapping_id)):
             self.manager.start(mapping_id)

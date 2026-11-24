@@ -42,6 +42,7 @@ class OrderTests(unittest.TestCase):
         manager._discovery = {}
         manager._recovery_warnings = []
         manager._daily_checks = Mock(spec=["refresh", "disarm"])
+        manager._auto_reconnect = Mock(spec=["refresh", "stop"])
         return manager
 
     def create(self, name, **changes):

@@ -13,7 +13,7 @@ from urllib.parse import quote, urlsplit
 
 MAPPING_FIELDS = ("name", "source_host", "source_port", "target_host", "target_port",
                   "bind_address", "target_address", "auto_start", "ssh_timeout",
-                  "daily_check_enabled", "daily_check_time")
+                  "daily_check_enabled", "daily_check_time", "auto_reconnect_enabled")
 
 
 class CommandError(Exception):
@@ -73,6 +73,14 @@ def _schedule_flags(parser):
                         help="每天检查时间，HH:MM，默认 09:00，使用管理器本地时间；不改变开关")
 
 
+def _reconnect_flags(parser):
+    reconnect = parser.add_mutually_exclusive_group()
+    reconnect.add_argument("--auto-reconnect", dest="auto_reconnect_enabled", action="store_true",
+                           default=argparse.SUPPRESS, help="断连后每隔 5 秒重连，连续失败 3 次后停止；默认开启")
+    reconnect.add_argument("--no-auto-reconnect", dest="auto_reconnect_enabled", action="store_false",
+                           default=argparse.SUPPRESS, help="关闭断线自动重连")
+
+
 def _mapping_flags(parser, *, required):
     parser.add_argument("--name", default=argparse.SUPPRESS, help="映射名称")
     for name in ("source", "target"):
@@ -91,6 +99,7 @@ def _mapping_flags(parser, *, required):
     startup.add_argument("--no-auto-start", dest="auto_start", action="store_false",
                          default=argparse.SUPPRESS, help="取消此映射的自动启动")
     _schedule_flags(parser)
+    _reconnect_flags(parser)
 
 
 def _parser():
@@ -117,6 +126,10 @@ def _parser():
                                   description="省略选项只查看；指定开关或时间时仅修改每日检查设置。")
     schedule.add_argument("ref", metavar="REF")
     _schedule_flags(schedule)
+    reconnect = actions.add_parser("reconnect", help="查看或设置断线自动重连；无需停止映射",
+                                   description="省略选项只查看；此命令只更改开关，不会立即启动或重启映射。")
+    reconnect.add_argument("ref", metavar="REF")
+    _reconnect_flags(reconnect)
     for action, help_text in (("show", "查看映射详情"), ("delete", "删除已停止的映射"),
                               ("start", "启动映射"), ("stop", "停止映射"),
                               ("check", "检查映射并更新目标进程数"),
@@ -220,6 +233,11 @@ def process_summary(mapping):
 
 def mapping_status(mapping):
     status = mapping.get("status")
+    recovery = (mapping.get("auto_reconnect") or {}).get("state")
+    if status not in {"stopped", "stopping"} and recovery in {"waiting", "reconnecting"}:
+        return "重连中"
+    if status not in {"stopped", "stopping"} and recovery == "exhausted":
+        return "已断开"
     if status in {"stopped", "starting", "stopping"}:
         return {"stopped": "已停止", "starting": "启动中", "stopping": "停止中"}[status]
     if status == "error" and mapping.get("failure_stage") == "start":
@@ -289,6 +307,11 @@ def _execute(args, *, running, request, data):
     path = _mapping_path(mapping)
     if args.action == "show":
         return mapping, "mapping", 0
+    if args.action == "reconnect":
+        changes = _payload(args)
+        if not changes:
+            return mapping, "mapping", 0
+        return client.call(path + "/reconnect", changes), "mapping", 0
     if args.action == "schedule":
         changes = _payload(args)
         if not changes:
@@ -339,6 +362,19 @@ def _schedule_summary(mapping):
     return "已关闭"
 
 
+def _reconnect_summary(mapping):
+    recovery = mapping.get("auto_reconnect") or {}
+    if recovery.get("state") == "exhausted":
+        return "已停止重试（3 次失败）"
+    if mapping.get("auto_reconnect_enabled", True) is not True:
+        return "已关闭"
+    if recovery.get("state") in {"waiting", "reconnecting"}:
+        return f"重连中（{recovery.get('attempts', 0)}/3）"
+    if recovery.get("state") == "blocked":
+        return "已暂停"
+    return "已开启"
+
+
 def _print_schedule(mapping):
     runtime = mapping.get("scheduled_check") or {}
     timezone = runtime.get("timezone")
@@ -369,11 +405,11 @@ def _print_human(result, kind):
     elif kind == "probe":
         print(_text(f"{result.get('alias', '')}：{'测试通过' if result.get('ok') is True else '测试失败'}。{result.get('message', '')}"))
     elif kind == "mappings":
-        print("ID\t名称\t状态\t目标进程\t入口 → 目标\t置顶\t每日检查")
+        print("ID\t名称\t状态\t目标进程\t入口 → 目标\t置顶\t每日检查\t自动重连")
         for item in result.get("mappings", []):
             print("\t".join(map(_cell, (item.get("id"), item.get("name"), mapping_status(item),
                                         process_summary(item), f"{_endpoint(item, 'source')} → {_endpoint(item, 'target')}",
-                                        "是" if item.get("pinned") is True else "否", _schedule_summary(item)))))
+                                        "是" if item.get("pinned") is True else "否", _schedule_summary(item), _reconnect_summary(item)))))
         if not result.get("mappings"):
             print("尚无映射。")
     elif kind in {"mapping", "unchecked_mapping"}:
@@ -389,6 +425,9 @@ def _print_human(result, kind):
             print(_text("进程快照：" + target_usage["checked_at"] + "（启动或检查时更新）"))
         print(f"置顶：{'是' if result.get('pinned') is True else '否'}；自动启动：{'是' if result.get('auto_start') is True else '否'}")
         _print_schedule(result)
+        print(_text(f"断线自动重连：{_reconnect_summary(result)}；间隔 5 秒，连续失败 3 次后停止重试。"))
+        if (result.get("auto_reconnect") or {}).get("message"):
+            print(_text(result["auto_reconnect"]["message"]))
         if result.get("error"):
             print(_text("原因：" + str(result["error"])))
         elif mapping_status(result) == "未确认" and (result.get("health") or {}).get("summary"):

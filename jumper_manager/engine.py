@@ -19,6 +19,7 @@ import uuid
 
 from .connections import local_connections, peer_key
 from .daily_checks import DailyChecks, SCHEDULE_FIELDS, DEFAULT_DAILY_CHECK_TIME, validate_schedule
+from .auto_reconnect import AutoReconnect, validate_reconnect
 from .target_processes import local_target_processes
 from .remote_linux import (remote_snapshot_script, parse_connection_snapshot,
                            remote_target_process_script, parse_target_snapshot)
@@ -38,7 +39,7 @@ SAFE_OPTIONS = ["BatchMode=yes", "PasswordAuthentication=no", "KbdInteractiveAut
                 "ServerAliveInterval=15",
                 "ControlMaster=no", "ControlPath=none", "RequestTTY=no",
                 "ForkAfterAuthentication=no", "PermitLocalCommand=no", "RemoteCommand=none"]
-FIELDS = ("name", "source_host", "source_port", "target_host", "target_port", "bind_address", "target_address", "auto_start", "pinned", "ssh_timeout", *SCHEDULE_FIELDS)
+FIELDS = ("name", "source_host", "source_port", "target_host", "target_port", "bind_address", "target_address", "auto_start", "pinned", "ssh_timeout", "auto_reconnect_enabled", *SCHEDULE_FIELDS)
 
 
 def ssh_wait_seconds(value) -> int:
@@ -196,6 +197,18 @@ class LocalRelay:
         self.thread.join(timeout=1)
 
 
+class _OperationCancellation:
+    def __init__(self, manager, mapping_id, generation):
+        self.manager, self.mapping_id, self.generation = manager, mapping_id, generation
+
+    def is_set(self):
+        try:
+            self.manager._daily_checks.ensure_current(self.mapping_id, self.generation)
+            return False
+        except (RuntimeError, KeyError):
+            return True
+
+
 class Manager:
     def __init__(self, root: Path, config_path: str | None = None):
         self.root = Path(root).resolve()
@@ -219,6 +232,7 @@ class Manager:
         self._hosts: list[dict] = []
         self._effective: dict[str, dict] = {}
         self._closed = threading.Event()
+        self._operation_context = threading.local()
         self._recovery_warnings: list[str] = []
         self._unrecovered_records: list[dict] = []
         self._config_signature = configuration_signature(self.config_path)
@@ -234,8 +248,10 @@ class Manager:
             self._write_safe_config()
         self._load()
         self._daily_checks = DailyChecks(self, atomic_json)
+        self._auto_reconnect = AutoReconnect(self, atomic_json)
         for mapping_id in self._mappings:
             self._daily_checks.refresh(mapping_id)
+            self._auto_reconnect.refresh(mapping_id)
         self._monitor_thread = threading.Thread(target=self._monitor, daemon=True, name="ssh-monitor")
         self._monitor_thread.start()
         self._config_thread = threading.Thread(target=self._watch_config, daemon=True, name="ssh-config-watch")
@@ -250,8 +266,8 @@ class Manager:
             deadline = time.monotonic() + timeout
             pending_input = input
             while True:
-                if self._closed.is_set():
-                    raise RuntimeError("程序正在关闭，已取消 SSH 操作。")
+                if self._operation_cancel_event().is_set():
+                    raise RuntimeError("程序正在关闭，已取消 SSH 操作。" if self._closed.is_set() else "操作已取消，已停止 SSH 检查。")
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise RuntimeError(f"SSH 操作超过 {timeout} 秒；请检查设备连接，或调大此映射的 SSH 连接等待时间。")
@@ -484,6 +500,7 @@ class Manager:
             raise ValueError("pinned 必须是布尔值。")
         result["pinned"] = pinned
         result.update(validate_schedule(payload))
+        result.update(validate_reconnect(payload))
         if result["source_host"] == result["target_host"] and result["source_port"] == result["target_port"] and result["bind_address"] == result["target_address"]:
             raise ValueError("监听端点和目标端点相同会形成回路，请修改设备、地址或端口。")
         return result
@@ -555,6 +572,7 @@ class Manager:
                     mapping["ssh_timeout"] = entry.get("ssh_timeout", DEFAULT_SSH_TIMEOUT)
                     mapping["daily_check_enabled"] = entry.get("daily_check_enabled", False)
                     mapping["daily_check_time"] = entry.get("daily_check_time", DEFAULT_DAILY_CHECK_TIME)
+                    mapping["auto_reconnect_enabled"] = entry.get("auto_reconnect_enabled", True)
                     mapping.update({"id": mapping_id, "status": "error", "route": [], "plan": {"route": [], "description": "配置需要修正", "warnings": [str(exc)], "steps": []},
                                     "error": str(exc), "health": None, "usage": None, "target_usage": None, "last_checked": None, "logs": []})
                 self._mappings[mapping_id] = mapping
@@ -572,6 +590,7 @@ class Manager:
         with self._lock:
             for mapping_id in self._mappings:
                 self._daily_checks.refresh(mapping_id)
+                self._auto_reconnect.refresh(mapping_id)
             ordered = sorted(self._mappings.values(), key=lambda value: not value.get("pinned", False))
             return {"hosts": copy.deepcopy(self._hosts), "mappings": copy.deepcopy(ordered), "ssh_config": str(self.config_path), "version": VERSION, "ssh_discovery": copy.deepcopy(self._discovery)}
 
@@ -598,6 +617,7 @@ class Manager:
                 raise
             self._log(mapping_id, "info", "映射已保存，尚未启动。")
             self._daily_checks.refresh(mapping_id)
+            self._auto_reconnect.refresh(mapping_id)
             return copy.deepcopy(mapping)
 
     def update(self, mapping_id, payload):
@@ -613,6 +633,7 @@ class Manager:
             if isinstance(payload, dict):
                 payload = {**{key: old.get(key, False if key == "daily_check_enabled" else DEFAULT_DAILY_CHECK_TIME)
                               for key in SCHEDULE_FIELDS}, **payload}
+                payload.setdefault("auto_reconnect_enabled", old.get("auto_reconnect_enabled", True))
             value = self._validate(payload)
             # Editing connection settings must not reset list metadata omitted
             # by the form. Pin changes have their own endpoint and ordering rule.
@@ -625,6 +646,7 @@ class Manager:
                 self._mappings[mapping_id] = old
                 raise
             self._daily_checks.disarm(mapping_id)
+            self._auto_reconnect.stop(mapping_id)
             self._log(mapping_id, "info", "映射配置已更新。")
             return copy.deepcopy(mapping)
 
@@ -648,6 +670,26 @@ class Manager:
                 self._log(mapping_id, "info", f"每日检查已启用，时间 {mapping['daily_check_time']}（管理器所在设备的本地时间）。"
                           if mapping["daily_check_enabled"] else "每日检查已关闭。")
             self._daily_checks.refresh(mapping_id)
+            return copy.deepcopy(mapping)
+
+    def set_reconnect(self, mapping_id, payload):
+        changes = validate_reconnect(payload, partial=True)
+        with self._lock:
+            if self._closed.is_set():
+                raise RuntimeError("程序正在关闭。")
+            mapping = self._get(mapping_id)
+            previous = mapping.get("auto_reconnect_enabled", True)
+            mapping.update(changes)
+            try:
+                self._save()
+            except Exception:
+                mapping["auto_reconnect_enabled"] = previous
+                raise
+            if previous != mapping["auto_reconnect_enabled"]:
+                self._auto_reconnect.changed(mapping_id)
+                self._log(mapping_id, "info", "自动重连已启用；断线后每隔 5 秒重试，连续 3 次失败后停止。"
+                          if mapping["auto_reconnect_enabled"] else "自动重连已关闭。")
+            self._auto_reconnect.refresh(mapping_id)
             return copy.deepcopy(mapping)
 
     def pin(self, mapping_id, pinned):
@@ -695,7 +737,9 @@ class Manager:
 
     def delete(self, mapping_id):
         self._get(mapping_id)
-        self._daily_checks.disarm(mapping_id)
+        with self._lock:
+            self._daily_checks.disarm(mapping_id)
+            self._auto_reconnect.stop(mapping_id)
         with self._mapping_locks[mapping_id]:
             stopped = self.stop(mapping_id)
             if stopped.get("status") != "stopped":
@@ -784,7 +828,7 @@ class Manager:
             return {"ok": False, "checked": False, "message": "此 SSH 别名含有额外转发配置，无法单独检查目标端口。"}
         try:
             return ssh_tcp_check(self._ssh_args(host, ssh_timeout=ssh_timeout), host, host_address, host_port,
-                                 timeout=ssh_timeout, cancel_event=self._closed)
+                                 timeout=ssh_timeout, cancel_event=self._operation_cancel_event())
         except (OSError, RuntimeError, ValueError) as exc:
             return {"ok": False, "checked": False, "message": str(exc)}
 
@@ -913,8 +957,8 @@ class Manager:
         timeout = entry.get("ssh_timeout", DEFAULT_SSH_TIMEOUT)
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            if self._closed.is_set():
-                raise RuntimeError("程序正在关闭，已取消启动。")
+            if self._operation_cancel_event().is_set():
+                raise RuntimeError("启动操作已取消。")
             if entry["process"].poll() is not None:
                 self._read_process_log(mapping_id, entry)
                 try:
@@ -947,10 +991,44 @@ class Manager:
         with self._lock:
             if self._closed.is_set():
                 raise RuntimeError("程序正在关闭。")
+            self._auto_reconnect.reset(mapping_id)
             generation = self._daily_checks.arm(mapping_id)
-        return self._start_mapping(mapping_id, generation)
+        return self._finish_start(mapping_id, generation)
+
+    def _finish_start(self, mapping_id, generation):
+        self._start_mapping(mapping_id, generation)
+        self._auto_reconnect.started(mapping_id, generation)
+        with self._lock:
+            return copy.deepcopy(self._get(mapping_id))
+
+    def start_automatic(self, mapping_id):
+        self._get(mapping_id)
+        with self._lock:
+            if self._closed.is_set():
+                raise RuntimeError("程序正在关闭。")
+            if self._auto_reconnect.blocked_startup(mapping_id):
+                self._auto_reconnect.refresh(mapping_id)
+                self._log(mapping_id, "warning", "已跳过自动启动：上次重连已停止或记录需要修正，请手动启动。")
+                return copy.deepcopy(self._get(mapping_id))
+            self._auto_reconnect.reset(mapping_id)
+            generation = self._daily_checks.arm(mapping_id)
+        return self._finish_start(mapping_id, generation)
+
+    def _operation_cancel_event(self):
+        return getattr(self._operation_context, "cancel", self._closed)
 
     def _start_mapping(self, mapping_id, generation, schedule_revision=None):
+        previous = getattr(self._operation_context, "cancel", None)
+        self._operation_context.cancel = _OperationCancellation(self, mapping_id, generation)
+        try:
+            return self._start_mapping_impl(mapping_id, generation, schedule_revision)
+        finally:
+            if previous is None:
+                del self._operation_context.cancel
+            else:
+                self._operation_context.cancel = previous
+
+    def _start_mapping_impl(self, mapping_id, generation, schedule_revision=None):
         self._get(mapping_id)
         with self._mapping_locks[mapping_id]:
             self._daily_checks.ensure_current(mapping_id, generation, schedule_revision)
@@ -1072,7 +1150,9 @@ class Manager:
     def stop(self, mapping_id):
         self._get(mapping_id)
         # Cancel before taking the mapping lock, even if a daily check is in SSH.
-        generation = self._daily_checks.disarm(mapping_id)
+        with self._lock:
+            generation = self._daily_checks.disarm(mapping_id)
+            self._auto_reconnect.stop(mapping_id)
         with self._mapping_locks[mapping_id]:
             with self._lock:
                 mapping = self._get(mapping_id)
@@ -1175,44 +1255,38 @@ class Manager:
             self._log(mapping_id, "info" if tunnel_ok else "warning", health["summary"])
             return copy.deepcopy(mapping)
 
+    def _transport_failure(self, mapping_id):
+        """Passive transport check; never open the target or count app processes.
+
+        OpenSSH keepalives terminate silent/dead SSH sessions, including hops.
+        Their timeout remains consistent with the configured SSH wait budget.
+        """
+        mapping = self._get(mapping_id)
+        entries = list(self._processes.get(mapping_id, []))
+        for entry in entries:
+            self._read_process_log(mapping_id, entry)
+        failed = [entry["alias"] for entry in entries if entry["process"].poll() is not None]
+        if failed:
+            return "SSH 连接已断开：" + ", ".join(failed) + "。"
+        relay = self._relays.get(mapping_id)
+        if relay is not None and (relay.closed.is_set() or not relay.thread.is_alive() or relay.listener.fileno() < 0):
+            return "本机端口转发已停止。"
+        if not entries and relay is None:
+            return "找不到本程序持有的转发进程。"
+        if (mapping.get("health") or {}).get("tunnel_ok") is False:
+            return "连接检查发现隧道已断开。"
+        return None
+
     def _monitor(self):
-        while not self._closed.wait(2):
-            with self._lock:
-                groups = list(self._processes.items())
-            for mapping_id, entries in groups:
-                lock = self._mapping_locks.get(mapping_id)
-                if not lock or not lock.acquire(blocking=False):
-                    continue
-                try:
-                    with self._lock:
-                        mapping = self._mappings.get(mapping_id)
-                        if not mapping or mapping["status"] not in {"running", "degraded"}:
-                            continue
-                        # A stop/start may have replaced the process group since
-                        # the outer snapshot, before this mapping lock was taken.
-                        entries = list(self._processes.get(mapping_id, []))
-                    for entry in entries:
-                        self._read_process_log(mapping_id, entry)
-                    failed = [entry for entry in entries if entry["process"].poll() is not None]
-                    if failed:
-                        message = "SSH 连接已断开：" + ", ".join(entry["alias"] for entry in failed) + "。已停止相关转发，可手动重新启动。"
-                        try:
-                            self._cleanup(mapping_id)
-                        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
-                            message += " 清理未完成：" + str(exc)
-                        with self._lock:
-                            mapping.update(status="error", error=message, usage=None, target_usage=None,
-                                           health={"ok": False, "tunnel_ok": False, "target_ok": None,
-                                                   "summary": message, "details": [message], "checked_at": now()})
-                        self._log(mapping_id, "error", message)
-                finally:
-                    lock.release()
+        while not self._closed.wait(1):
+            self._auto_reconnect.tick()
 
     def close(self):
         if self._closed.is_set():
             return
         self._closed.set()
         self._daily_checks.close()
+        self._auto_reconnect.close()
         self._monitor_thread.join(timeout=3)
         self._config_thread.join(timeout=3)
         with self._lock:

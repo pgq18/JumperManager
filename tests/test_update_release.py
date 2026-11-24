@@ -149,12 +149,12 @@ class ReleaseTests(unittest.TestCase):
     def test_rate_limit_has_useful_error(self):
         error = HTTPError(updates.API_URL, 403, "rate limited", {}, None)
         self.addCleanup(error.close)
-        with patch.object(updates, "_fetch_bytes", side_effect=error):
+        with patch.object(updates, "_fetch_bytes", side_effect=error), patch.object(updates, "_page_release", side_effect=error):
             with self.assertRaisesRegex(updates.UpdateError, "稍后重试"):
                 updates.check_release("1.2.2")
 
     def test_invalid_json_becomes_update_error(self):
-        with patch.object(updates, "_fetch_bytes", return_value=b"not json"):
+        with patch.object(updates, "_fetch_bytes", return_value=b"not json"), patch.object(updates, "_page_release", side_effect=updates.UpdateError("invalid page")):
             with self.assertRaises(updates.UpdateError):
                 updates.check_release("1.2.2")
 

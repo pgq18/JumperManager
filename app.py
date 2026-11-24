@@ -197,7 +197,7 @@ def serve(args):
                     break
                 if mapping.get("auto_start"):
                     try:
-                        manager.start(mapping["id"])
+                        manager.start_automatic(mapping["id"])
                     except Exception:
                         logging.exception("Auto start failed for %s", mapping["id"])
 

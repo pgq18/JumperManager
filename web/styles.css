@@ -1150,13 +1150,13 @@ h1 {
   background: currentColor;
 }
 
-.status-badge.unavailable,.status-badge.start_failed {
+.status-badge.unavailable,.status-badge.start_failed,.status-badge.disconnected {
   color: var(--danger);
   border-color: #f08c8d25;
   background: #f08c8d0b;
 }
 
-.status-badge.starting,.status-badge.stopping {
+.status-badge.starting,.status-badge.stopping,.status-badge.reconnecting {
   color: var(--warning);
   background: #eab96d0a;
   border-color: #eab96d25;
@@ -2296,7 +2296,7 @@ h1 {
   color: var(--accent);
 }
 
-.schedule-details {
+.schedule-details,.reconnect-details {
   border-top: 1px solid var(--line-soft);
   padding-top: 16px;
   margin-top: 18px;
